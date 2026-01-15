@@ -285,6 +285,12 @@ async def approve_and_run_experiment(
     ctx: Context,
     experiment_id: str = Field(..., description="Experiment ID from create_draft_pr_for_review"),
     gpu_enabled: bool = Field(default=True, description="Whether to use GPU (default: True for model training)"),
+    selected_steps: list[str] = Field(
+        default=["train"],
+        description="Workflow steps to execute. Default is ['train'] only. "
+                   "Options: 'dataset', 'train', 'calibrate_m3', 'calibrate_m1', 'mark_success', 'validation'. "
+                   "Example: ['train', 'calibrate_m3'] to run training and calibration."
+    ),
 ) -> Dict[str, Any]:
     """
     Approve a pending experiment and run it on K8s.
@@ -293,11 +299,18 @@ async def approve_and_run_experiment(
     This will:
     1. Launch a K8s pod (GPU for model training)
     2. Clone the repo and checkout the PR branch
-    3. Run the training command
+    3. Run the selected workflow steps (default: train only)
     4. Collect metrics and return results
 
-    Note: For MODEL_TRAINING, the command is:
-    python -c "from {module_path}.train import train; train('{utc_time_4h_ago}')"
+    Available steps:
+    - dataset: Create dataset (required for whisky/wheres models)
+    - train: Run model training
+    - calibrate_m3: Run calibration (cal_m3)
+    - calibrate_m1: Run calibration (cal_m1)
+    - mark_success: Mark model as successful
+    - validation: Run model validation
+
+    By default, only 'train' is executed. Add more steps as needed.
     """
     if experiment_id not in pending_experiments:
         return {
@@ -327,11 +340,12 @@ async def approve_and_run_experiment(
         pending.state = ExperimentState.RUNNING
         pending_experiments[experiment_id] = pending
 
-        # Run the experiment
+        # Run the experiment with selected steps
         result = await run_experiment(
             implementation=pending.implementation,
             spec=pending.spec,
-            gpu_enabled=use_gpu
+            gpu_enabled=use_gpu,
+            selected_steps=selected_steps,
         )
 
         # Update result with PR info

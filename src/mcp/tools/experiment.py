@@ -1,14 +1,19 @@
 """Experiment runner using Kubernetes and dable-k8s-runner.
 
+Training workflows are dynamically parsed from ai-craft's Airflow DAG files:
+  - Location: ai-craft/workflow/airflow_dags/
+
+This ensures the agent always uses the same workflow as production.
+
 Workflow:
 1. Draft PR created -> Wait for user approval
 2. User approves -> Launch K8s pod (GPU for model training)
 3. Clone repo, checkout branch
-4. Run training command: python -c "from {module_path}.train import train; train('{utc_time}')"
-5. Collect metrics and report results
+4. Parse DAG file to determine training workflow
+5. Execute training workflow
+6. Collect metrics and report results
 """
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -17,6 +22,12 @@ import uuid
 from src.core.config import settings
 from src.core.models import TechSpec, ExperimentResult
 from src.k8s.pod_launcher import K8sPodLauncher
+from src.mcp.tools.workflow_parser import (
+    WorkflowParser,
+    WorkflowStep,
+    TrainingWorkflow,
+    generate_training_script_from_workflow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +39,43 @@ def get_utc_time_hours_ago(hours: int = 4) -> str:
         hours: Number of hours ago (default: 4)
 
     Returns:
-        UTC time string in format 'YYYY-MM-DD HH:00:00'
+        UTC time string in format 'YYYY-MM-DD-HH' (e.g., '2026-01-15-02')
     """
     utc_now = datetime.now(timezone.utc)
     time_ago = utc_now - timedelta(hours=hours)
     # Round down to hour
     time_ago = time_ago.replace(minute=0, second=0, microsecond=0)
-    return time_ago.strftime("%Y-%m-%d %H:%M:%S")
+    return time_ago.strftime("%Y-%m-%d-%H")
+
+
+def get_utc_time_iso(hours_ago: int = 4) -> str:
+    """Get UTC time in ISO format (for dataset creation).
+
+    Args:
+        hours_ago: Number of hours ago (default: 4)
+
+    Returns:
+        UTC time string in ISO format (e.g., '2026-01-15T02:00:00')
+    """
+    utc_now = datetime.now(timezone.utc)
+    time_ago = utc_now - timedelta(hours=hours_ago)
+    time_ago = time_ago.replace(minute=0, second=0, microsecond=0)
+    return time_ago.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def get_utc_time_iso_days_ago(days: int = 90) -> str:
+    """Get UTC time in ISO format from N days ago (for dataset range).
+
+    Args:
+        days: Number of days ago (default: 90)
+
+    Returns:
+        UTC time string in ISO format
+    """
+    utc_now = datetime.now(timezone.utc)
+    time_ago = utc_now - timedelta(days=days)
+    time_ago = time_ago.replace(hour=0, minute=0, second=0, microsecond=0)
+    return time_ago.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def convert_path_to_module(implementation_path: str) -> str:
@@ -63,7 +104,8 @@ def convert_path_to_module(implementation_path: str) -> str:
 async def run_experiment(
     implementation: Dict[str, Any],
     spec: TechSpec,
-    gpu_enabled: bool = False
+    gpu_enabled: bool = False,
+    selected_steps: Optional[list[str]] = None,
 ) -> ExperimentResult:
     """
     Run experiment in Kubernetes environment.
@@ -72,12 +114,14 @@ async def run_experiment(
         implementation: Generated code implementation
         spec: Technical specification
         gpu_enabled: Whether to use GPU
+        selected_steps: Workflow steps to execute. Default is ["train"] only.
 
     Returns:
         ExperimentResult with metrics and status
     """
     experiment_id = str(uuid.uuid4())[:8]
     logger.info(f"Starting experiment {experiment_id} for {spec.title}")
+    logger.info(f"Selected steps: {selected_steps or ['train']}")
 
     # Initialize pod launcher
     launcher = K8sPodLauncher()
@@ -101,8 +145,10 @@ async def run_experiment(
             instance_type=instance_type
         )
 
-        # Prepare experiment script
-        experiment_script = prepare_experiment_script(implementation, spec)
+        # Prepare experiment script with selected steps
+        experiment_script = prepare_experiment_script(
+            implementation, spec, selected_steps=selected_steps
+        )
 
         # Execute experiment
         logger.info(f"Executing experiment on pod {pod_name}")
@@ -149,22 +195,35 @@ async def run_experiment(
 
 def prepare_experiment_script(
     implementation: Dict[str, Any],
-    spec: TechSpec
+    spec: TechSpec,
+    ai_craft_path: Optional[str] = None,
+    selected_steps: Optional[list[str]] = None,
 ) -> str:
     """
-    Prepare experiment execution script.
+    Prepare experiment execution script by parsing DAG files.
 
-    For MODEL_TRAINING:
-    1. Clone ai-craft repo and checkout the PR branch
-    2. Run training command: python -c "from {module}.train import train; train('{utc_time}')"
+    The workflow is dynamically determined from ai-craft's Airflow DAG files,
+    ensuring the agent uses the same workflow as production.
 
     Args:
         implementation: Generated code with branch_name, repository, implementation_path
         spec: Technical specification
+        ai_craft_path: Path to ai-craft repo (for parsing DAGs)
+        selected_steps: Steps to execute. Default is ["train"] only.
+                       Options: ["dataset", "train", "calibrate_m3", "calibrate_m1", "mark_success", "validation"]
 
     Returns:
         Bash script to execute experiment
     """
+    # Convert string step names to WorkflowStep enum
+    workflow_steps = None
+    if selected_steps:
+        workflow_steps = []
+        for step in selected_steps:
+            try:
+                workflow_steps.append(WorkflowStep(step))
+            except ValueError:
+                logger.warning(f"Unknown step: {step}, skipping")
     branch_name = implementation.get("branch_name", "main")
     repository = implementation.get("repository", "ai-craft")
     implementation_path = implementation.get("implementation_path", "")
@@ -180,16 +239,37 @@ def prepare_experiment_script(
     ]
 
     if spec.task_type == "MODEL_TRAINING":
-        # Get UTC time 4 hours ago for training
+        # Get UTC times
         utc_time = get_utc_time_hours_ago(4)
+        utc_time_iso = get_utc_time_iso(4)
+        utc_time_90d_iso = get_utc_time_iso_days_ago(90)
 
         # Convert path to module
         module_path = convert_path_to_module(implementation_path)
 
-        # Get repo URL
-        repo_url = f"git@github.com:{settings.github_org}/{repository}.git"
+        # Parse workflow from DAG files
+        if ai_craft_path:
+            parser = WorkflowParser(ai_craft_path)
+            workflow = parser.find_workflow_for_model(module_path)
+        else:
+            # Try common paths
+            for path in ["/Users/choieq/Projects/dable/ai-craft", "/home/dable/ai-craft"]:
+                try:
+                    parser = WorkflowParser(path)
+                    workflow = parser.find_workflow_for_model(module_path)
+                    if workflow:
+                        break
+                except Exception:
+                    continue
+            else:
+                workflow = None
+
+        # Get repo URL (using HTTPS with token for pod access)
+        repo_url = f"https://${{GITHUB_TOKEN}}@github.com/{settings.github_org}/{repository}.git"
 
         script_lines.extend([
+            f"echo 'Module: {module_path}'",
+            "",
             "# Clone repository and checkout branch",
             f"REPO_DIR=/tmp/{repository}",
             "rm -rf $REPO_DIR",
@@ -197,30 +277,45 @@ def prepare_experiment_script(
             "cd $REPO_DIR",
             f"git checkout {branch_name}",
             "",
-            "# Install dependencies",
-            "pip install -e . || pip install -r requirements.txt || true",
-            "",
-            "# Run model training",
-            f"echo 'Running training for module: {module_path}'",
-            f"echo 'UTC time parameter: {utc_time}'",
-            "",
-            f'python -c "from {module_path}.train import train; train(\'{utc_time}\')"',
-            "",
-            "echo '=== Training completed ==='",
         ])
 
+        if workflow:
+            # Filter to selected steps (default: train only)
+            if workflow_steps:
+                filtered_workflow = workflow.filter_steps(workflow_steps)
+            else:
+                filtered_workflow = workflow.filter_steps([WorkflowStep.TRAIN])
+
+            logger.info(f"Full workflow: {workflow.steps}")
+            logger.info(f"Selected steps: {filtered_workflow.steps}")
+
+            script_lines.append(f"echo 'Selected steps: {' -> '.join(s.value for s in filtered_workflow.steps)}'")
+            script_lines.append("")
+            script_lines.extend(generate_training_script_from_workflow(
+                filtered_workflow, utc_time, utc_time_iso, utc_time_90d_iso,
+                selected_steps=workflow_steps
+            ))
+        else:
+            # Fallback: simple train command
+            logger.warning(f"No workflow found for {module_path}, using simple train")
+            script_lines.extend([
+                "echo 'Workflow: fallback (simple train)'",
+                "",
+                f"echo 'Running training for: {module_path}'",
+                f'python -c "from {module_path}.train import train; train(\'{utc_time}\')"',
+                "",
+                "echo '=== Training completed ==='",
+            ])
+
     elif spec.task_type == "FEATURE_ENGINEERING":
-        # Feature engineering uses different execution pattern
+        repo_url = f"https://${{GITHUB_TOKEN}}@github.com/{settings.github_org}/{repository}.git"
         script_lines.extend([
             "# Clone repository and checkout branch",
             f"REPO_DIR=/tmp/{repository}",
             "rm -rf $REPO_DIR",
-            f"git clone git@github.com:{settings.github_org}/{repository}.git $REPO_DIR",
+            f"git clone {repo_url} $REPO_DIR",
             "cd $REPO_DIR",
             f"git checkout {branch_name}",
-            "",
-            "# Install dependencies",
-            "pip install -e . || pip install -r requirements.txt || true",
             "",
             "# Run feature pipeline",
             "python -m feature_pipeline",

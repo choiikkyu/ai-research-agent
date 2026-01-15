@@ -44,19 +44,28 @@ uv run python -m src.main
 
 ```
 1. analyze_tech_spec     - Notion spec 분석
-2. generate_implementation - 코드 생성
+2. generate_implementation - 코드 생성 (2-commit strategy for model modifications)
 3. create_draft_pr       - Draft PR 생성
          ↓
    [사용자 PR 리뷰]
          ↓
 4. approve_and_run_experiment - 승인 후 실험 실행
          ↓
-   K8s GPU Pod에서 실행:
-   python -c "from {module}.train import train; train('{utc_time}')"
+   K8s GPU Pod에서 도메인별 실험 실행:
+   - DNA (vodka):  train() → calibrate_m3()
+   - Wheres (whisky): dataset → train() → calibrate_m3() → mark_success()
          ↓
 5. evaluate_experiment   - 결과 평가
 6. finalize_pr           - PR 머지/종료
 ```
+
+### Domain-Specific Workflows
+
+| Domain | Models | Dataset Required | Workflow |
+|--------|--------|------------------|----------|
+| **DNA** | vodka_v2, vodka_v3 | No | `train()` → `calibrate_m3()` |
+| **Wheres** | whisky_v1 | Yes (90일) | `dataset` → `train(local_training=True)` → `calibrate_m3()` → `mark_success()` |
+
 
 ## Usage
 
@@ -110,8 +119,6 @@ ai-research-agent/
 │   │   └── github_code_reference.py
 │   └── k8s/                 # K8s 관리
 ├── k8s/                     # K8s 배포 설정
-├── .claude/                 # Claude 참조 문서
-│   └── COMMIT_STRATEGY.md
 └── pyproject.toml
 ```
 

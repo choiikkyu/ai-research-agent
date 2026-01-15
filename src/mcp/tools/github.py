@@ -89,18 +89,41 @@ async def create_model_pr_with_2commit_strategy(
     # Get reference files
     reference_files = _get_directory_contents(repo, reference_path)
 
+    # Check if there's a corresponding common.nn directory to copy
+    # Pattern: whisky_v1/base_clk_dcn24 -> whisky_v1/common/nn/base_clk_dcn24
+    common_nn_files = {}
+    ref_common_nn_path = _get_common_nn_path(reference_path, reference_name)
+    dest_common_nn_path = _get_common_nn_path(destination_path, new_name)
+
+    if ref_common_nn_path:
+        try:
+            common_nn_files = _get_directory_contents(repo, ref_common_nn_path)
+            logger.info(f"Found common.nn directory: {ref_common_nn_path} ({len(common_nn_files)} files)")
+        except Exception as e:
+            logger.warning(f"No common.nn directory found at {ref_common_nn_path}: {e}")
+
     # =========================================================================
     # COMMIT 1: Copy with name changes only
     # =========================================================================
     commit1_message = f"[AI Agent] Copy {reference_name} -> {new_name} (name changes only)"
     commit1_files = {}
 
+    # Copy model files
     for file_path, content in reference_files.items():
         # Replace reference name with new name (case-sensitive variants)
         new_content = _replace_model_name(content, reference_name, new_name)
 
         # Calculate new file path
         new_file_path = file_path.replace(reference_path, destination_path)
+        commit1_files[new_file_path] = new_content
+
+    # Copy common.nn files if they exist
+    for file_path, content in common_nn_files.items():
+        # Replace reference name with new name
+        new_content = _replace_model_name(content, reference_name, new_name)
+
+        # Calculate new file path
+        new_file_path = file_path.replace(ref_common_nn_path, dest_common_nn_path)
         commit1_files[new_file_path] = new_content
 
     # Create files for Commit 1
@@ -214,6 +237,37 @@ def _replace_model_name(content: str, old_name: str, new_name: str) -> str:
     result = result.replace(old_name.upper(), new_name.upper())
 
     return result
+
+
+def _get_common_nn_path(model_path: str, model_name: str) -> Optional[str]:
+    """Get the common.nn path for a given model path.
+
+    For whisky_v1 models, there's a corresponding common.nn directory.
+    Example:
+        Model path: src/dable_ai_craft/dsp_models/whisky_v1/base_clk_dcn24
+        Common path: src/dable_ai_craft/dsp_models/whisky_v1/common/nn/base_clk_dcn24
+
+    Args:
+        model_path: Path to the model directory
+        model_name: Name of the model
+
+    Returns:
+        Path to common.nn directory if pattern matches, None otherwise
+    """
+    # Pattern: .../whisky_v1/{model_name} or .../vodka_v3/{model_name}
+    # -> .../whisky_v1/common/nn/{model_name} or .../vodka_v3/common/nn/{model_name}
+
+    patterns = ["whisky_v1", "vodka_v3", "vodka_v2"]
+
+    for pattern in patterns:
+        if f"/{pattern}/" in model_path:
+            # Extract base path up to the version directory
+            parts = model_path.split(f"/{pattern}/")
+            if len(parts) == 2:
+                base_path = parts[0]
+                return f"{base_path}/{pattern}/common/nn/{model_name}"
+
+    return None
 
 
 def _to_pascal_case(snake_str: str) -> str:
