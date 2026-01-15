@@ -1,0 +1,212 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-research-agent
+  namespace: tf-box
+  labels:
+    app: ai-research-agent
+    team: ai
+    component: mcp-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ai-research-agent
+  template:
+    metadata:
+      labels:
+        app: ai-research-agent
+        team: ai
+        component: mcp-server
+    spec:
+      serviceAccountName: ai-research-agent
+      containers:
+      - name: mcp-server
+        image: ai-research-agent:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        env:
+        - name: ENVIRONMENT
+          value: "production"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-research-agent-secrets
+              key: anthropic-api-key
+        - name: SLACK_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ai-research-agent-secrets
+              key: slack-bot-token
+        - name: SLACK_APP_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ai-research-agent-secrets
+              key: slack-app-token
+        - name: SLACK_SIGNING_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: ai-research-agent-secrets
+              key: slack-signing-secret
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ai-research-agent-secrets
+              key: github-token
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: ai-research-agent-secrets
+              key: aws-access-key-id
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-research-agent-secrets
+              key: aws-secret-access-key
+        resources:
+          requests:
+            cpu: "2000m"
+            memory: "4Gi"
+          limits:
+            cpu: "4000m"
+            memory: "8Gi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: ai-research-agent-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-research-agent
+  namespace: tf-box
+  labels:
+    app: ai-research-agent
+    team: ai
+spec:
+  type: ClusterIP
+  selector:
+    app: ai-research-agent
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+    protocol: TCP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ai-research-agent
+  namespace: tf-box
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ai-research-agent
+  namespace: tf-box
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "pods/exec"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ai-research-agent
+  namespace: tf-box
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ai-research-agent
+subjects:
+- kind: ServiceAccount
+  name: ai-research-agent
+  namespace: tf-box
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-research-agent-config
+  namespace: tf-box
+data:
+  config.yaml: |
+    environment: production
+    log_level: INFO
+
+    github:
+      org: teamdable
+      repos:
+        ai_craft: ai-craft
+        ai_feature_store: ai-feature-store
+
+    mlflow:
+      tracking_uri: http://mlflow.ai.svc.cluster.local:5000
+      s3_endpoint_url: https://s3.ap-northeast-2.amazonaws.com
+
+    redis:
+      host: redis.ai.svc.cluster.local
+      port: 6379
+      db: 0
+
+    kubernetes:
+      namespace: tf-box
+      service_account: ai-research-agent
+
+    aws:
+      default_region: ap-northeast-2
+
+    experiment:
+      default_gpu_instance: g4dn.4xlarge
+      default_cpu_instance: r6i.2xlarge
+
+    evaluation:
+      model:
+        auc_threshold: 0.85
+        logloss_threshold: 0.35
+        calibration_error_threshold: 0.02
+      feature:
+        null_ratio_threshold: 0.1
+        importance_threshold: 0.05
+        latency_threshold: 10.0
