@@ -1,7 +1,16 @@
-"""Experiment runner using Kubernetes and dable-k8s-runner."""
+"""Experiment runner using Kubernetes and dable-k8s-runner.
+
+Workflow:
+1. Draft PR created -> Wait for user approval
+2. User approves -> Launch K8s pod (GPU for model training)
+3. Clone repo, checkout branch
+4. Run training command: python -c "from {module_path}.train import train; train('{utc_time}')"
+5. Collect metrics and report results
+"""
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 import uuid
 
@@ -10,6 +19,45 @@ from src.core.models import TechSpec, ExperimentResult
 from src.k8s.pod_launcher import K8sPodLauncher
 
 logger = logging.getLogger(__name__)
+
+
+def get_utc_time_hours_ago(hours: int = 4) -> str:
+    """Get UTC time string from N hours ago.
+
+    Args:
+        hours: Number of hours ago (default: 4)
+
+    Returns:
+        UTC time string in format 'YYYY-MM-DD HH:00:00'
+    """
+    utc_now = datetime.now(timezone.utc)
+    time_ago = utc_now - timedelta(hours=hours)
+    # Round down to hour
+    time_ago = time_ago.replace(minute=0, second=0, microsecond=0)
+    return time_ago.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def convert_path_to_module(implementation_path: str) -> str:
+    """Convert file path to Python module path.
+
+    Args:
+        implementation_path: e.g., "src/dable_ai_craft/dsp_models/vodka_v3/external/per_ssp/xandr_mtltest"
+
+    Returns:
+        Module path: e.g., "dable_ai_craft.dsp_models.vodka_v3.external.per_ssp.xandr_mtltest"
+    """
+    # Remove leading src/ if present
+    path = implementation_path
+    if path.startswith("src/"):
+        path = path[4:]
+
+    # Remove trailing slash
+    path = path.rstrip("/")
+
+    # Convert slashes to dots
+    module_path = path.replace("/", ".")
+
+    return module_path
 
 
 async def run_experiment(
@@ -106,57 +154,94 @@ def prepare_experiment_script(
     """
     Prepare experiment execution script.
 
+    For MODEL_TRAINING:
+    1. Clone ai-craft repo and checkout the PR branch
+    2. Run training command: python -c "from {module}.train import train; train('{utc_time}')"
+
     Args:
-        implementation: Generated code
+        implementation: Generated code with branch_name, repository, implementation_path
         spec: Technical specification
 
     Returns:
         Bash script to execute experiment
     """
-    files = implementation.get("files", {})
+    branch_name = implementation.get("branch_name", "main")
+    repository = implementation.get("repository", "ai-craft")
+    implementation_path = implementation.get("implementation_path", "")
 
     script_lines = [
         "#!/bin/bash",
         "set -e",  # Exit on error
         "",
-        "# Create experiment directory",
-        f"EXPERIMENT_DIR=/tmp/experiment_{implementation.get('branch_name', 'default')}",
-        "mkdir -p $EXPERIMENT_DIR",
-        "cd $EXPERIMENT_DIR",
+        f"echo '=== Starting experiment for {spec.title} ==='",
+        f"echo 'Branch: {branch_name}'",
+        f"echo 'Repository: {repository}'",
         "",
-        "# Write generated files",
     ]
 
-    # Write each generated file
-    for filename, content in files.items():
-        # Escape special characters for bash
-        escaped_content = content.replace("'", "'\"'\"'")
+    if spec.task_type == "MODEL_TRAINING":
+        # Get UTC time 4 hours ago for training
+        utc_time = get_utc_time_hours_ago(4)
+
+        # Convert path to module
+        module_path = convert_path_to_module(implementation_path)
+
+        # Get repo URL
+        repo_url = f"git@github.com:{settings.github_org}/{repository}.git"
+
         script_lines.extend([
-            f"cat > {filename} << 'EOF'",
-            content,
-            "EOF",
+            "# Clone repository and checkout branch",
+            f"REPO_DIR=/tmp/{repository}",
+            "rm -rf $REPO_DIR",
+            f"git clone {repo_url} $REPO_DIR",
+            "cd $REPO_DIR",
+            f"git checkout {branch_name}",
             "",
+            "# Install dependencies",
+            "pip install -e . || pip install -r requirements.txt || true",
+            "",
+            "# Run model training",
+            f"echo 'Running training for module: {module_path}'",
+            f"echo 'UTC time parameter: {utc_time}'",
+            "",
+            f'python -c "from {module_path}.train import train; train(\'{utc_time}\')"',
+            "",
+            "echo '=== Training completed ==='",
         ])
 
-    # Add execution commands based on task type
-    if spec.task_type == "MODEL_TRAINING":
-        script_lines.extend([
-            "# Install dependencies",
-            "pip install -r requirements.txt || true",
-            "",
-            "# Run training",
-            "python train.py",
-        ])
     elif spec.task_type == "FEATURE_ENGINEERING":
+        # Feature engineering uses different execution pattern
         script_lines.extend([
+            "# Clone repository and checkout branch",
+            f"REPO_DIR=/tmp/{repository}",
+            "rm -rf $REPO_DIR",
+            f"git clone git@github.com:{settings.github_org}/{repository}.git $REPO_DIR",
+            "cd $REPO_DIR",
+            f"git checkout {branch_name}",
+            "",
             "# Install dependencies",
-            "pip install -r requirements.txt || true",
+            "pip install -e . || pip install -r requirements.txt || true",
             "",
             "# Run feature pipeline",
-            "python feature_pipeline.py",
+            "python -m feature_pipeline",
+            "",
+            "echo '=== Feature engineering completed ==='",
         ])
 
     return "\n".join(script_lines)
+
+
+def generate_training_command(module_path: str, utc_time: str) -> str:
+    """Generate the model training command.
+
+    Args:
+        module_path: Python module path (e.g., dable_ai_craft.dsp_models.vodka_v3....)
+        utc_time: UTC time string for training
+
+    Returns:
+        Training command string
+    """
+    return f'python -c "from {module_path}.train import train; train(\'{utc_time}\')"'
 
 
 async def collect_metrics(

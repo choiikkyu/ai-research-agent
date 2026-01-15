@@ -5,6 +5,7 @@ Tech Spec 문서를 입력받아 코드 생성, 실험 실행, PR 관리까지 �
 ## Features
 
 - **코드 자동 생성**: Tech spec 기반 패턴 매칭 코드 생성
+- **Draft PR 워크플로우**: PR 생성 후 사용자 승인을 받고 실험 실행
 - **실험 자동화**: K8s GPU/CPU Pod 자동 할당 및 실험 실행
 - **결과 평가**: 실험 결과 자동 평가 및 리포팅
 - **PR 관리**: GitHub PR 생성, 결과에 따른 자동 merge/delete
@@ -39,7 +40,37 @@ cp .env.example .env
 uv run python -m src.main
 ```
 
+## Workflow (Model Training)
+
+```
+1. analyze_tech_spec     - Notion spec 분석
+2. generate_implementation - 코드 생성
+3. create_draft_pr       - Draft PR 생성
+         ↓
+   [사용자 PR 리뷰]
+         ↓
+4. approve_and_run_experiment - 승인 후 실험 실행
+         ↓
+   K8s GPU Pod에서 실행:
+   python -c "from {module}.train import train; train('{utc_time}')"
+         ↓
+5. evaluate_experiment   - 결과 평가
+6. finalize_pr           - PR 머지/종료
+```
+
 ## Usage
+
+### MCP Tools
+
+```python
+# 1. Draft PR 생성 (실험 대기)
+result = await run_full_workflow(request)
+# -> experiment_id, pr_url 반환
+
+# 2. 사용자가 PR 리뷰 후 승인
+result = await approve_and_run_experiment(experiment_id="abc123")
+# -> 실험 실행 및 결과 반환
+```
 
 ### Slack 명령어
 
@@ -59,7 +90,8 @@ uv run python -m src.main
 |--------|------|
 | `help` | 도움말 |
 | `status <id>` | 실험 상태 확인 |
-| `list` | 진행 중인 작업 목록 |
+| `list` | 대기 중인 실험 목록 |
+| `approve <id>` | 실험 승인 및 실행 |
 | `cancel <id>` | 실험 취소 |
 
 ## Project Structure
