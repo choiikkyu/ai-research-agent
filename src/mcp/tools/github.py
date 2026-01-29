@@ -64,6 +64,7 @@ async def create_model_pr_with_2commit_strategy(
         Dict with pr_number, pr_url, branch_name, commits info
     """
     logger.info(f"Creating PR with 2-commit strategy: {reference_name} -> {new_name}")
+    logger.info(f"Modifications to apply: {modifications}")
 
     g = Github(settings.github_token.get_secret_value())
     full_repo_name = f"{settings.github_org}/{repo_name}"
@@ -122,14 +123,19 @@ async def create_model_pr_with_2commit_strategy(
         # Replace reference name with new name
         new_content = _replace_model_name(content, reference_name, new_name)
 
-        # Calculate new file path
-        new_file_path = file_path.replace(ref_common_nn_path, dest_common_nn_path)
-        commit1_files[new_file_path] = new_content
+        # Calculate new file path (only if dest_common_nn_path is valid)
+        if ref_common_nn_path and dest_common_nn_path:
+            new_file_path = file_path.replace(ref_common_nn_path, dest_common_nn_path)
+            commit1_files[new_file_path] = new_content
+        else:
+            logger.warning(f"Skipping common.nn file {file_path} due to invalid destination path")
 
     # Create files for Commit 1
     for file_path, content in commit1_files.items():
+        # Normalize path for GitHub API
+        normalized_path = _normalize_github_path(file_path)
         repo.create_file(
-            path=file_path,
+            path=normalized_path,
             message=commit1_message,
             content=content,
             branch=branch_name
@@ -144,18 +150,23 @@ async def create_model_pr_with_2commit_strategy(
 
     for filename, changes in modifications.items():
         file_path = f"{destination_path}/{filename}"
+        normalized_path = _normalize_github_path(file_path)
         try:
-            file_obj = repo.get_contents(file_path, ref=branch_name)
+            file_obj = repo.get_contents(normalized_path, ref=branch_name)
             current_content = file_obj.decoded_content.decode('utf-8')
 
             # Apply modifications
             new_content = current_content
             for old_str, new_str in changes.items():
-                new_content = new_content.replace(old_str, new_str)
+                if old_str in current_content:
+                    new_content = new_content.replace(old_str, new_str)
+                    logger.debug(f"Applied modification in {filename}: {old_str[:50]}... -> {new_str[:50]}...")
+                else:
+                    logger.warning(f"Pattern not found in {filename}: {old_str[:100]}...")
 
             if new_content != current_content:
                 repo.update_file(
-                    path=file_path,
+                    path=normalized_path,
                     message=commit2_message,
                     content=new_content,
                     sha=file_obj.sha,
@@ -163,6 +174,8 @@ async def create_model_pr_with_2commit_strategy(
                 )
                 commit2_count += 1
                 logger.info(f"Commit 2: Modified {filename}")
+            else:
+                logger.warning(f"No changes applied to {filename}")
 
         except Exception as e:
             logger.error(f"Failed to modify {filename}: {e}")
@@ -266,6 +279,17 @@ def _get_common_nn_path(model_path: str, model_name: str) -> Optional[str]:
             if len(parts) == 2:
                 base_path = parts[0]
                 return f"{base_path}/{pattern}/common/nn/{model_name}"
+
+    # For new models not under a specific version directory,
+    # place common.nn files under whisky_v1 (since it's a whisky-based model)
+    if "dsp_models" in model_path and "whisky" not in model_path and "vodka" not in model_path:
+        # Extract base path up to dsp_models
+        if "/dsp_models/" in model_path:
+            parts = model_path.split("/dsp_models/")
+            if len(parts) == 2:
+                base_path = parts[0]
+                # Default to whisky_v1 for whisky-based models
+                return f"{base_path}/dsp_models/whisky_v1/common/nn/{model_name}"
 
     return None
 
@@ -390,13 +414,14 @@ async def manage_pr(
 
         # Create or update files
         for filename, content in implementation.get("files", {}).items():
+            normalized_filename = _normalize_github_path(filename)
             try:
                 # Check if file exists
                 try:
-                    file = repo.get_contents(filename, ref=branch_name)
+                    file = repo.get_contents(normalized_filename, ref=branch_name)
                     # Update existing file
                     repo.update_file(
-                        path=filename,
+                        path=normalized_filename,
                         message=f"Update {filename} via AI Research Agent",
                         content=content,
                         sha=file.sha,
@@ -406,7 +431,7 @@ async def manage_pr(
                 except:
                     # Create new file
                     repo.create_file(
-                        path=filename,
+                        path=normalized_filename,
                         message=f"Create {filename} via AI Research Agent",
                         content=content,
                         branch=branch_name
@@ -648,3 +673,28 @@ def determine_pr_labels(
         labels.append("ai-feature-store")
 
     return labels
+
+
+def _normalize_github_path(path: str) -> str:
+    """Normalize file path for GitHub API.
+
+    Args:
+        path: Raw file path
+
+    Returns:
+        Normalized path safe for GitHub API
+    """
+    # Remove leading/trailing slashes
+    path = path.strip("/")
+
+    # Replace multiple slashes with single slash
+    while "//" in path:
+        path = path.replace("//", "/")
+
+    # Remove any invalid characters for GitHub paths
+    # GitHub paths should not contain certain characters
+    invalid_chars = ["<", ">", ":", "\"", "|", "?", "*"]
+    for char in invalid_chars:
+        path = path.replace(char, "_")
+
+    return path

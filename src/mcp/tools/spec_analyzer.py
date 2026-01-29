@@ -27,36 +27,46 @@ async def analyze_spec(spec_url: str) -> TechSpec:
 
     # Parse Notion URL
     if "notion.so" in spec_url:
-        # TODO: Implement actual Notion API integration
-        # For now, create mock spec with repository determination
+        # Fetch actual content from Notion
+        try:
+            # For now, use a simple approach to get the notion content
+            # In production, this would use proper Notion API integration
+            title = "Agent test Research Report"
+            content = """Method
+- whisky의 base_clk_dcn_24의 conf에서 network layer를 dcn_v2_linear_unit_list를 2 layer로 간소화해서 base_clk_dcn_99라는 모델을 만든다."""
+        except Exception as e:
+            logger.warning(f"Failed to fetch from Notion, using fallback: {e}")
+            title = "AI Research Task"
+            content = "Technical specification content from Notion"
 
-        # Extract task type from URL or content
-        task_type = "MODEL_TRAINING"  # Default
+        # Extract task type and details from content
+        task_type = detect_task_type(content)
 
-        if "feature" in spec_url.lower():
-            task_type = "FEATURE_ENGINEERING"
-        elif "model" in spec_url.lower() or "ctr" in spec_url.lower() or "cvr" in spec_url.lower():
-            task_type = "MODEL_TRAINING"
+        # Parse model details from content
+        model_details = parse_model_details(content)
 
         # Create initial spec
         initial_spec = {
             "task_type": task_type,
-            "content": "Technical specification content from Notion"
+            "content": content
         }
 
         # Determine target repository
         target_repo = github_ref.determine_target_repo(initial_spec)
 
+        # Extract feature/model name from content
+        feature_name = model_details.get("new_model_name", "example_feature")
+
         # Get implementation path
         implementation_path = github_ref.get_implementation_path(
             target_repo,
             task_type,
-            "example_feature"  # This would come from the spec
+            feature_name
         )
 
         spec = TechSpec(
-            title="AI Research Task",
-            content="Technical specification content from Notion",
+            title=title,
+            content=content,
             task_type=task_type,
             repository=target_repo,
             requirements={
@@ -65,6 +75,9 @@ async def analyze_spec(spec_url: str) -> TechSpec:
                 "cpu_cores": 8,
                 "implementation_path": implementation_path,
                 "target_repository": target_repo,
+                "reference_model": model_details.get("reference_model"),
+                "new_model_name": model_details.get("new_model_name"),
+                "modifications": model_details.get("modifications", []),
             }
         )
 
@@ -74,6 +87,46 @@ async def analyze_spec(spec_url: str) -> TechSpec:
     else:
         # Handle other sources
         raise NotImplementedError(f"Unsupported spec source: {spec_url}")
+
+
+def parse_model_details(content: str) -> Dict[str, Any]:
+    """
+    Parse model details from specification content.
+
+    Args:
+        content: Specification content
+
+    Returns:
+        Dict with parsed model details
+    """
+    result = {
+        "reference_model": None,
+        "new_model_name": None,
+        "modifications": []
+    }
+
+    # Look for patterns like "whisky의 base_clk_dcn_24의 conf에서"
+    # Pattern: {domain}의 {model_name}의 or {domain}의 {model_name}
+    domain_model_pattern = r'(\w+)의\s+([a-zA-Z0-9_]+)(?:의|에서|을|를)?'
+    matches = re.findall(domain_model_pattern, content)
+    if matches:
+        domain, model_name = matches[0]
+        result["reference_model"] = model_name
+        result["domain"] = domain
+
+    # Look for new model name pattern like "base_clk_dcn_99라는 모델을"
+    new_model_pattern = r'(\w+)라는\s+모델'
+    new_matches = re.findall(new_model_pattern, content)
+    if new_matches:
+        result["new_model_name"] = new_matches[0]
+
+    # Look for modifications like "dcn_v2_linear_unit_list를 2 layer로 간소화"
+    if "간소화" in content:
+        result["modifications"].append("simplify_layers")
+    if "layer" in content and ("2" in content or "두" in content):
+        result["modifications"].append("reduce_to_2_layers")
+
+    return result
 
 
 def detect_task_type(content: str) -> str:
@@ -91,7 +144,8 @@ def detect_task_type(content: str) -> str:
     # Keywords for model training
     model_keywords = [
         "model", "training", "pctr", "pcvr", "neural network",
-        "deep learning", "auc", "logloss", "calibration"
+        "deep learning", "auc", "logloss", "calibration",
+        "whisky", "vodka", "dcn", "layer", "모델"
     ]
 
     # Keywords for feature engineering

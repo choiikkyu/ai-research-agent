@@ -396,9 +396,9 @@ class GitHubCodeReference:
         """
         if repo_name == "ai-craft":
             if task_type == "MODEL_TRAINING":
-                base = "dsp_models/"
+                base = "src/dable_ai_craft/dsp_models/"
             else:
-                base = "experiments/"
+                base = "src/dable_ai_craft/experiments/"
         else:  # ai-feature-store
             if task_type == "FEATURE_ENGINEERING":
                 base = "features/"

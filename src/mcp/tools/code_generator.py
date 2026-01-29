@@ -80,11 +80,21 @@ class PatternBasedCodeGenerator:
             "repository": spec.repository
         })
 
+        # Get reference model path from spec requirements
+        ref_model_name = None
+        if hasattr(spec, 'requirements') and spec.requirements:
+            ref_model_name = spec.requirements.get('reference_model')
+
+        # Find reference path based on model name
+        resolved_reference_path = reference_path
+        if ref_model_name and not reference_path:
+            resolved_reference_path = await self._find_model_path(target_repo, ref_model_name)
+
         # Collect context (CLAUDE.md + reference files)
         context = await self._github_ref.get_context_for_generation(
             repo_name=target_repo,
             task_type=spec.task_type,
-            reference_path=reference_path,
+            reference_path=resolved_reference_path,
             keywords=self._extract_keywords(spec)
         )
 
@@ -203,6 +213,60 @@ class PatternBasedCodeGenerator:
 
         return "".join(prompt_parts)
 
+    async def _find_model_path(self, repo_name: str, model_name: str) -> Optional[str]:
+        """Find the path to a model by its name.
+
+        Args:
+            repo_name: Repository name
+            model_name: Model name to find (e.g., base_clk_dcn_24)
+
+        Returns:
+            Full path to the model directory if found
+        """
+        # Common model directories in ai-craft (prioritize whisky_v1 first)
+        search_paths = [
+            "src/dable_ai_craft/dsp_models/whisky_v1/",
+            "src/dable_ai_craft/dsp_models/vodka_v3/external/per_ssp/",
+            "src/dable_ai_craft/dsp_models/vodka_v3/internal/",
+        ]
+
+        logger.info(f"Searching for model {model_name} in {repo_name}")
+
+        # Also try common variations
+        model_variations = [
+            model_name,  # exact
+            model_name.replace("_", ""),  # no underscores: base_clk_dcn_24 -> baseclkdcn24
+            model_name.replace("-", ""),  # no dashes
+        ]
+
+        # Special case for numbered models like base_clk_dcn_24 -> base_clk_dcn24
+        import re
+        numbered_pattern = r'(.+)_(\d+)$'
+        match = re.match(numbered_pattern, model_name)
+        if match:
+            base_part, number = match.groups()
+            numbered_variant = f"{base_part}{number}"
+            model_variations.append(numbered_variant)
+
+        for base_path in search_paths:
+            try:
+                logger.debug(f"Searching in {base_path}")
+                # List directories in the base path
+                contents = await self._github_ref.list_directory(repo_name, base_path)
+                for item in contents:
+                    if item["type"] == "dir":
+                        # Try all variations
+                        for variation in model_variations:
+                            if item["name"] == variation:
+                                logger.info(f"Found model: {item['name']} for {model_name} in {base_path}")
+                                return f"{base_path}{item['name']}"
+            except Exception as e:
+                logger.debug(f"Failed to search in {base_path}: {e}")
+                continue
+
+        logger.warning(f"Model {model_name} not found in {repo_name}")
+        return None
+
     def _extract_keywords(self, spec: TechSpec) -> List[str]:
         """Extract keywords from spec for finding similar implementations."""
         keywords = []
@@ -232,6 +296,9 @@ class PatternBasedCodeGenerator:
         """Extract model/feature name from spec."""
         # Try to find explicit name in requirements
         if hasattr(spec, 'requirements') and spec.requirements:
+            # First try new_model_name (from parsed content)
+            if 'new_model_name' in spec.requirements:
+                return spec.requirements['new_model_name']
             if 'name' in spec.requirements:
                 return spec.requirements['name']
             if 'model_name' in spec.requirements:
