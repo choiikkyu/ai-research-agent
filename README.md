@@ -1,10 +1,10 @@
 # AI Research Automation Agent
 
-Tech Spec 문서를 입력받아 코드 생성, 실험 실행, PR 관리까지 자동화하는 AI Agent입니다.
+Tech Spec 문서를 입력받아 모델 학습 코드 생성, 실험 실행, PR 관리까지 자동화하는 AI Agent입니다.
 
 ## Features
 
-- **코드 자동 생성**: Tech spec 기반 패턴 매칭 코드 생성
+- **모델 코드 자동 생성**: Tech spec 기반 패턴 매칭 코드 생성
 - **Draft PR 워크플로우**: PR 생성 후 사용자 승인을 받고 실험 실행
 - **실험 자동화**: K8s GPU/CPU Pod 자동 할당 및 실험 실행
 - **결과 평가**: 실험 결과 자동 평가 및 리포팅
@@ -141,11 +141,6 @@ uv run ruff format .
 - AUC > 0.85
 - LogLoss < 0.35
 - Calibration Error < 0.02
-
-### Feature Engineering
-- Null Ratio < 10%
-- Importance Score > 0.05
-- Latency Impact < 10ms
 
 ## Links
 

@@ -131,39 +131,16 @@ def parse_model_details(content: str) -> Dict[str, Any]:
 
 def detect_task_type(content: str) -> str:
     """
-    Detect task type from specification content.
+    Detect task type from specification content (always MODEL_TRAINING).
 
     Args:
         content: Specification content
 
     Returns:
-        Task type string
+        Task type string (always MODEL_TRAINING)
     """
-    content_lower = content.lower()
-
-    # Keywords for model training
-    model_keywords = [
-        "model", "training", "pctr", "pcvr", "neural network",
-        "deep learning", "auc", "logloss", "calibration",
-        "whisky", "vodka", "dcn", "layer", "모델"
-    ]
-
-    # Keywords for feature engineering
-    feature_keywords = [
-        "feature", "engineering", "pipeline", "transformation",
-        "aggregation", "null ratio", "importance"
-    ]
-
-    model_score = sum(1 for kw in model_keywords if kw in content_lower)
-    feature_score = sum(1 for kw in feature_keywords if kw in content_lower)
-
-    if model_score > feature_score:
-        return "MODEL_TRAINING"
-    elif feature_score > model_score:
-        return "FEATURE_ENGINEERING"
-    else:
-        # Default to model training if unclear
-        return "MODEL_TRAINING"
+    # Only MODEL_TRAINING is supported
+    return "MODEL_TRAINING"
 
 
 def extract_requirements(content: str) -> Dict[str, Any]:

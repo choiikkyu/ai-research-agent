@@ -365,24 +365,18 @@ class PatternBasedCodeGenerator:
         """Determine which PR strategy to use.
 
         Use MODEL_MODIFICATION (2-commit strategy) when:
-        1. Task type is MODEL_TRAINING
-        2. There's a reference model being used as base
-        3. The reference has multiple files (>=3)
+        1. There's a reference model being used as base
+        2. The reference has multiple files (>=3)
 
         Otherwise use NEW_IMPLEMENTATION (standard single commit).
 
         Args:
-            spec: Technical specification
+            spec: Technical specification (always MODEL_TRAINING)
             context: Generation context with reference info
 
         Returns:
             PRStrategy enum value
         """
-        # Check if this is a model training task
-        if spec.task_type != "MODEL_TRAINING":
-            logger.debug(f"PR strategy: NEW_IMPLEMENTATION (task_type={spec.task_type})")
-            return PRStrategy.NEW_IMPLEMENTATION
-
         # Check if there's a reference model
         reference_path = context.get("reference_path")
         if not reference_path:

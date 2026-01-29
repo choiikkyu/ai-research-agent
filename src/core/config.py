@@ -41,9 +41,6 @@ class Settings(BaseSettings):
     github_repo_ai_craft: str = Field(
         default="ai-craft", description="AI Craft Repository"
     )
-    github_repo_ai_feature_store: str = Field(
-        default="ai-feature-store", description="AI Feature Store Repository"
-    )
 
     # MLflow Configuration
     mlflow_tracking_uri: str = Field(
@@ -94,7 +91,7 @@ class Settings(BaseSettings):
         description="Default CPU instance type for experiments",
     )
 
-    # Evaluation Thresholds
+    # Evaluation Thresholds (Model Training only)
     model_auc_threshold: float = Field(
         default=0.85, description="Minimum AUC threshold for model training"
     )
@@ -103,15 +100,6 @@ class Settings(BaseSettings):
     )
     model_calibration_error_threshold: float = Field(
         default=0.02, description="Maximum calibration error threshold"
-    )
-    feature_null_ratio_threshold: float = Field(
-        default=0.1, description="Maximum null ratio for features"
-    )
-    feature_importance_threshold: float = Field(
-        default=0.05, description="Minimum importance score for features"
-    )
-    serving_latency_increase_threshold: float = Field(
-        default=10.0, description="Maximum serving latency increase in ms"
     )
 
     @property

@@ -25,7 +25,7 @@ async def main():
         # Analyze repositories
         print("\n📊 Analyzing repositories...")
 
-        for repo_name in ["ai-craft", "ai-feature-store"]:
+        for repo_name in ["ai-craft"]:
             print(f"\n--- {repo_name} ---")
             analysis = await manager.analyze_codebase(repo_name)
 

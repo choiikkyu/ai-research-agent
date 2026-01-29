@@ -307,22 +307,6 @@ def prepare_experiment_script(
                 "echo '=== Training completed ==='",
             ])
 
-    elif spec.task_type == "FEATURE_ENGINEERING":
-        repo_url = f"https://${{GITHUB_TOKEN}}@github.com/{settings.github_org}/{repository}.git"
-        script_lines.extend([
-            "# Clone repository and checkout branch",
-            f"REPO_DIR=/tmp/{repository}",
-            "rm -rf $REPO_DIR",
-            f"git clone {repo_url} $REPO_DIR",
-            "cd $REPO_DIR",
-            f"git checkout {branch_name}",
-            "",
-            "# Run feature pipeline",
-            "python -m feature_pipeline",
-            "",
-            "echo '=== Feature engineering completed ==='",
-        ])
-
     return "\n".join(script_lines)
 
 
@@ -341,97 +325,63 @@ def generate_training_command(module_path: str, utc_time: str) -> str:
 
 async def collect_metrics(
     experiment_id: str,
-    task_type: str
+    task_type: str = "MODEL_TRAINING"
 ) -> Dict[str, float]:
     """
     Collect metrics from MLflow or other sources.
 
     Args:
         experiment_id: Experiment identifier
-        task_type: Type of task
+        task_type: Type of task (always MODEL_TRAINING)
 
     Returns:
         Dictionary of metrics
     """
     # TODO: Implement actual MLflow integration
-    # For now, return mock metrics
-
-    if task_type == "MODEL_TRAINING":
-        return {
-            "auc": 0.87,
-            "logloss": 0.32,
-            "calibration_error": 0.015,
-            "training_time_minutes": 45.2,
-            "num_parameters": 1500000,
-        }
-    elif task_type == "FEATURE_ENGINEERING":
-        return {
-            "null_ratio": 0.05,
-            "importance_score": 0.08,
-            "latency_ms": 8.5,
-            "coverage": 0.95,
-            "num_features": 25,
-        }
-    else:
-        return {}
+    # For now, return mock metrics for MODEL_TRAINING
+    return {
+        "auc": 0.87,
+        "logloss": 0.32,
+        "calibration_error": 0.015,
+        "training_time_minutes": 45.2,
+        "num_parameters": 1500000,
+    }
 
 
 def generate_recommendations(
     metrics: Dict[str, float],
-    task_type: str
+    task_type: str = "MODEL_TRAINING"
 ) -> list[str]:
     """
     Generate recommendations based on metrics.
 
     Args:
         metrics: Experiment metrics
-        task_type: Type of task
+        task_type: Type of task (always MODEL_TRAINING)
 
     Returns:
         List of recommendations
     """
     recommendations = []
 
-    if task_type == "MODEL_TRAINING":
-        auc = metrics.get("auc", 0)
-        logloss = metrics.get("logloss", 1)
+    auc = metrics.get("auc", 0)
+    logloss = metrics.get("logloss", 1)
 
-        if auc < settings.model_auc_threshold:
-            recommendations.append(
-                f"AUC ({auc:.3f}) is below threshold ({settings.model_auc_threshold}). "
-                "Consider: increasing model complexity, adding features, or tuning hyperparameters."
-            )
+    if auc < settings.model_auc_threshold:
+        recommendations.append(
+            f"AUC ({auc:.3f}) is below threshold ({settings.model_auc_threshold}). "
+            "Consider: increasing model complexity, adding features, or tuning hyperparameters."
+        )
 
-        if logloss > settings.model_logloss_threshold:
-            recommendations.append(
-                f"LogLoss ({logloss:.3f}) exceeds threshold ({settings.model_logloss_threshold}). "
-                "Consider: regularization, dropout, or reducing model complexity."
-            )
+    if logloss > settings.model_logloss_threshold:
+        recommendations.append(
+            f"LogLoss ({logloss:.3f}) exceeds threshold ({settings.model_logloss_threshold}). "
+            "Consider: regularization, dropout, or reducing model complexity."
+        )
 
-        if auc > 0.9 and logloss < 0.3:
-            recommendations.append(
-                "Excellent model performance! Consider deploying to production."
-            )
-
-    elif task_type == "FEATURE_ENGINEERING":
-        null_ratio = metrics.get("null_ratio", 1)
-        importance = metrics.get("importance_score", 0)
-
-        if null_ratio > settings.feature_null_ratio_threshold:
-            recommendations.append(
-                f"High null ratio ({null_ratio:.2%}) detected. "
-                "Consider: data imputation or removing the feature."
-            )
-
-        if importance < settings.feature_importance_threshold:
-            recommendations.append(
-                f"Low feature importance ({importance:.3f}). "
-                "Consider: feature transformation or engineering new features."
-            )
-
-        if null_ratio < 0.01 and importance > 0.1:
-            recommendations.append(
-                "High-quality feature! Ready for production use."
-            )
+    if auc > 0.9 and logloss < 0.3:
+        recommendations.append(
+            "Excellent model performance! Consider deploying to production."
+        )
 
     return recommendations if recommendations else ["No specific recommendations."]

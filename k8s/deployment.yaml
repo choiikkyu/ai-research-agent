@@ -179,7 +179,6 @@ data:
       org: teamdable
       repos:
         ai_craft: ai-craft
-        ai_feature_store: ai-feature-store
 
     mlflow:
       tracking_uri: http://mlflow.ai.svc.cluster.local:5000
@@ -206,7 +205,3 @@ data:
         auc_threshold: 0.85
         logloss_threshold: 0.35
         calibration_error_threshold: 0.02
-      feature:
-        null_ratio_threshold: 0.1
-        importance_threshold: 0.05
-        latency_threshold: 10.0

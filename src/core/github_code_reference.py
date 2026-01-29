@@ -29,7 +29,7 @@ class GitHubCodeReference:
     3. Reading reference files for pattern-based generation
     """
 
-    # Supported repositories
+    # Supported repositories (Model Training only)
     REPOS = {
         "ai-craft": {
             "full_name": "teamdable/ai-craft",
@@ -39,11 +39,6 @@ class GitHubCodeReference:
                 "src/dable_ai_craft/dsp_models/whisky_v1/",
             ],
             "default_task": "MODEL_TRAINING"
-        },
-        "ai-feature-store": {
-            "full_name": "teamdable/ai-feature-store",
-            "model_dirs": ["features/", "pipelines/", "transformers/"],
-            "default_task": "FEATURE_ENGINEERING"
         }
     }
 
@@ -200,14 +195,14 @@ class GitHubCodeReference:
     async def find_similar_implementation(
         self,
         repo_name: str,
-        task_type: str,
+        task_type: str = "MODEL_TRAINING",
         keywords: List[str] = None
     ) -> Optional[str]:
         """Find a similar implementation directory for reference.
 
         Args:
-            repo_name: Repository name
-            task_type: Task type (MODEL_TRAINING, FEATURE_ENGINEERING)
+            repo_name: Repository name (ai-craft only)
+            task_type: Task type (always MODEL_TRAINING)
             keywords: Optional keywords to match
 
         Returns:
@@ -278,7 +273,7 @@ class GitHubCodeReference:
     async def get_context_for_generation(
         self,
         repo_name: str,
-        task_type: str,
+        task_type: str = "MODEL_TRAINING",
         reference_path: str = None,
         keywords: List[str] = None
     ) -> Dict[str, Any]:
@@ -289,8 +284,8 @@ class GitHubCodeReference:
         2. Reference implementation files
 
         Args:
-            repo_name: Target repository
-            task_type: Task type
+            repo_name: Target repository (ai-craft only)
+            task_type: Task type (always MODEL_TRAINING)
             reference_path: Optional explicit reference path
             keywords: Optional keywords for finding similar implementation
 
@@ -299,7 +294,7 @@ class GitHubCodeReference:
         """
         context = {
             "repo_name": repo_name,
-            "task_type": task_type,
+            "task_type": "MODEL_TRAINING",
             "conventions": "",
             "reference_path": None,
             "reference_files": {},
@@ -314,7 +309,7 @@ class GitHubCodeReference:
             ref_path = reference_path
         else:
             ref_path = await self.find_similar_implementation(
-                repo_name, task_type, keywords
+                repo_name, "MODEL_TRAINING", keywords
             )
 
         if ref_path:
@@ -341,42 +336,16 @@ class GitHubCodeReference:
     # ===== Repository Selection =====
 
     def determine_target_repo(self, spec: Dict[str, Any]) -> str:
-        """Determine target repository based on specification.
+        """Determine target repository (always ai-craft for model training).
 
         Args:
             spec: Technical specification dict
 
         Returns:
-            Repository name (ai-craft or ai-feature-store)
+            Repository name (always ai-craft)
         """
-        # Check if explicitly specified
-        if "target_repository" in spec:
-            return spec["target_repository"]
-
-        if "repository" in spec:
-            return spec["repository"]
-
-        # Determine based on task type
-        task_type = spec.get("task_type", "")
-
-        if task_type == "FEATURE_ENGINEERING":
-            return "ai-feature-store"
-        elif task_type == "MODEL_TRAINING":
-            return "ai-craft"
-
-        # Analyze content for hints
-        content = spec.get("content", "").lower()
-
-        feature_keywords = ["feature", "pipeline", "transform", "etl", "data processing"]
-        model_keywords = ["model", "training", "pctr", "pcvr", "neural", "serving"]
-
-        feature_score = sum(1 for kw in feature_keywords if kw in content)
-        model_score = sum(1 for kw in model_keywords if kw in content)
-
-        if feature_score > model_score:
-            return "ai-feature-store"
-
-        return "ai-craft"  # Default
+        # Always return ai-craft for model training
+        return "ai-craft"
 
     def get_implementation_path(
         self,
@@ -387,23 +356,14 @@ class GitHubCodeReference:
         """Get suggested implementation path within repository.
 
         Args:
-            repo_name: Target repository
-            task_type: Task type
-            feature_name: Optional feature/model name
+            repo_name: Target repository (ai-craft only)
+            task_type: Task type (MODEL_TRAINING only)
+            feature_name: Optional model name
 
         Returns:
             Suggested path for new implementation
         """
-        if repo_name == "ai-craft":
-            if task_type == "MODEL_TRAINING":
-                base = "src/dable_ai_craft/dsp_models/"
-            else:
-                base = "src/dable_ai_craft/experiments/"
-        else:  # ai-feature-store
-            if task_type == "FEATURE_ENGINEERING":
-                base = "features/"
-            else:
-                base = "pipelines/"
+        base = "src/dable_ai_craft/dsp_models/"
 
         if feature_name:
             safe_name = feature_name.lower().replace(" ", "_").replace("-", "_")

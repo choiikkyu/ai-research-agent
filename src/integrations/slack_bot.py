@@ -267,13 +267,13 @@ class SlackBot:
         }
 
     async def start_experiment(self, spec_url: str, user: str) -> Dict[str, Any]:
-        """Start an experiment from a specification URL."""
+        """Start a model training experiment from a specification URL."""
         # Extract options from text if present
-        # For now, use defaults
+        # For now, use defaults for model training
         request = ExperimentRequest(
             spec_url=spec_url,
-            repo="ai-craft",
-            gpu_enabled=True if "gpu" in spec_url.lower() else False,
+            repo="ai-craft",  # Only ai-craft is supported
+            gpu_enabled=True,  # Model training requires GPU
             auto_merge=False,
             cleanup_on_failure=True
         )

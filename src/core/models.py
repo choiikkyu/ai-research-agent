@@ -26,8 +26,8 @@ class TechSpec(BaseModel):
 
     title: str = Field(..., description="Title of the specification")
     content: str = Field(..., description="Specification content")
-    task_type: str = Field(..., description="Task type: MODEL_TRAINING or FEATURE_ENGINEERING")
-    repository: str = Field(default="ai-craft", description="Target repository")
+    task_type: str = Field(default="MODEL_TRAINING", description="Task type: MODEL_TRAINING only")
+    repository: str = Field(default="ai-craft", description="Target repository (ai-craft only)")
     requirements: Dict[str, Any] = Field(default_factory=dict, description="Additional requirements")
 
 
