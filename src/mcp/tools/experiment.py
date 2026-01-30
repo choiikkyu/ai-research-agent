@@ -325,27 +325,67 @@ def generate_training_command(module_path: str, utc_time: str) -> str:
 
 async def collect_metrics(
     experiment_id: str,
-    task_type: str = "MODEL_TRAINING"
+    task_type: str = "MODEL_TRAINING",
+    run_id: str = None
 ) -> Dict[str, float]:
     """
     Collect metrics from MLflow or other sources.
 
     Args:
-        experiment_id: Experiment identifier
+        experiment_id: Experiment identifier (used as MLflow experiment name)
         task_type: Type of task (always MODEL_TRAINING)
+        run_id: Optional MLflow run ID for direct lookup
 
     Returns:
-        Dictionary of metrics
+        Dictionary of metrics from MLflow, or default values if unavailable
     """
-    # TODO: Implement actual MLflow integration
-    # For now, return mock metrics for MODEL_TRAINING
-    return {
-        "auc": 0.87,
-        "logloss": 0.32,
-        "calibration_error": 0.015,
-        "training_time_minutes": 45.2,
-        "num_parameters": 1500000,
-    }
+    from src.integrations.mlflow_client import MLflowClient
+
+    logger.info(f"Collecting metrics for experiment_id={experiment_id}, run_id={run_id}")
+
+    # Initialize MLflow client
+    mlflow_client = MLflowClient(tracking_uri=settings.mlflow_tracking_uri)
+
+    # Try to get metrics from MLflow
+    metrics = {}
+
+    if run_id:
+        # Direct run lookup
+        logger.info(f"Fetching metrics directly from run_id: {run_id}")
+        metrics = await mlflow_client.get_run_metrics(run_id)
+    else:
+        # Lookup by experiment name (latest run)
+        logger.info(f"Fetching latest run from experiment: {experiment_id}")
+        metrics = await mlflow_client.get_latest_run_metrics(experiment_id)
+
+    # Check if we got required metrics
+    required_metrics = ["auc", "logloss"]
+    has_required = any(m in metrics for m in required_metrics)
+
+    if has_required and metrics:
+        logger.info(f"Successfully retrieved {len(metrics)} metrics from MLflow")
+
+        # Log available metrics for debugging
+        available_keys = set(metrics.keys())
+        logger.debug(f"Available metrics: {sorted(available_keys)}")
+
+        # Return all metrics from MLflow (maximizing flexibility)
+        return metrics
+    else:
+        # Fallback to default values if MLflow doesn't have required metrics
+        logger.warning(
+            f"Required metrics not found in MLflow. "
+            f"Available: {list(metrics.keys()) if metrics else 'None'}. "
+            f"Using default values."
+        )
+
+        return {
+            "auc": 0.0,
+            "logloss": 1.0,
+            "calibration_error": 1.0,
+            "training_time_minutes": 0.0,
+            "num_parameters": 0,
+        }
 
 
 def generate_recommendations(

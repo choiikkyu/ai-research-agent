@@ -51,14 +51,31 @@ def evaluate_model_training(metrics: Dict[str, float]) -> Dict[str, Any]:
     - Calibration Error < 0.02
 
     Args:
-        metrics: Model training metrics
+        metrics: Model training metrics (can include additional metrics)
 
     Returns:
-        Evaluation result
+        Evaluation result with all metrics preserved
     """
-    auc = metrics.get("auc", 0)
-    logloss = metrics.get("logloss", float("inf"))
-    calibration_error = metrics.get("calibration_error", float("inf"))
+    # Extract primary metrics with flexible key names
+    auc = (
+        metrics.get("auc") or
+        metrics.get("test_auc") or
+        metrics.get("validation_auc") or
+        0.0
+    )
+    logloss = (
+        metrics.get("logloss") or
+        metrics.get("test_logloss") or
+        metrics.get("validation_logloss") or
+        float("inf")
+    )
+    calibration_error = (
+        metrics.get("calibration_error") or
+        metrics.get("calib_error") or
+        metrics.get("m3_calibration_error") or
+        metrics.get("m3_calib_error") or
+        float("inf")
+    )
 
     # Check thresholds
     auc_pass = auc > settings.model_auc_threshold
@@ -100,11 +117,20 @@ def evaluate_model_training(metrics: Dict[str, float]) -> Dict[str, Any]:
     else:
         reason = "All metrics passed thresholds"
 
+    # Include all metrics in the result for transparency
+    all_metrics_summary = {}
+    primary_keys = ["auc", "test_auc", "logloss", "test_logloss", "calibration_error"]
+    for key in primary_keys:
+        if key in metrics:
+            all_metrics_summary[key] = metrics[key]
+
     return {
         "passed": passed,
         "reason": reason,
         "details": details,
-        "score": calculate_model_score(metrics)
+        "score": calculate_model_score(metrics),
+        "all_metrics": all_metrics_summary,
+        "raw_metrics": metrics  # Include all raw metrics for completeness
     }
 
 
