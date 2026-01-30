@@ -7,18 +7,16 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
-class ExperimentState(str, Enum):
-    """Experiment lifecycle states.
+
+
+class SessionStatus(str, Enum):
+    """Experiment session status.
 
     Flow:
-    DRAFT_PR_CREATED -> (user approval) -> APPROVED -> RUNNING -> COMPLETED/FAILED
+    ACTIVE -> TERMINATED
     """
-    DRAFT_PR_CREATED = "draft_pr_created"  # Draft PR created, waiting for approval
-    APPROVED = "approved"                   # User approved, ready to run
-    RUNNING = "running"                     # Experiment in progress
-    COMPLETED = "completed"                 # Experiment finished successfully
-    FAILED = "failed"                       # Experiment failed
-    CANCELLED = "cancelled"                 # User cancelled
+    ACTIVE = "active"           # Session is running with a pod
+    TERMINATED = "terminated"   # Session and pod terminated
 
 
 class TechSpec(BaseModel):
@@ -52,24 +50,19 @@ class ExperimentResult(BaseModel):
     recommendations: List[str] = Field(default_factory=list, description="Recommendations")
 
 
-class PendingExperiment(BaseModel):
-    """Experiment waiting for user approval.
+class ExperimentSession(BaseModel):
+    """Experiment session for running multiple experiments on a single pod.
 
-    Created after Draft PR is made, before experiment runs.
+    The pod remains active across multiple experiments until explicitly terminated.
     """
 
-    experiment_id: str = Field(..., description="Unique experiment identifier")
-    state: ExperimentState = Field(default=ExperimentState.DRAFT_PR_CREATED)
-    spec: TechSpec = Field(..., description="Technical specification")
-    implementation: Dict[str, Any] = Field(..., description="Generated implementation")
-    pr_url: str = Field(..., description="Draft PR URL")
-    pr_number: int = Field(..., description="PR number")
-    branch_name: str = Field(..., description="Git branch name")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-
-    # Training specific info
-    training_command: Optional[str] = Field(None, description="Training command to run")
-    module_path: Optional[str] = Field(None, description="Python module path for training")
+    session_id: str = Field(..., description="Unique session identifier")
+    pod_name: str = Field(..., description="Kubernetes pod name")
+    status: SessionStatus = Field(default=SessionStatus.ACTIVE, description="Session status")
+    created_at: datetime = Field(default_factory=datetime.utcnow, description="Session creation time")
+    experiment_ids: List[str] = Field(default_factory=list, description="List of experiment IDs in this session")
+    pod_type: str = Field(..., description="Pod type: gpu or cpu")
+    instance_type: str = Field(..., description="Instance type (e.g., g4dn.xlarge)")
 
     class Config:
         use_enum_values = True

@@ -24,8 +24,6 @@ from src.core.models import (
     TechSpec,
     ExperimentRequest,
     ExperimentResult,
-    ExperimentState,
-    PendingExperiment,
 )
 from src.mcp.tools import (
     analyze_spec,
@@ -39,6 +37,11 @@ from src.mcp.tools.experiment import (
     convert_path_to_module,
     get_utc_time_hours_ago,
     generate_training_command,
+    create_session,
+    run_experiment_in_session,
+    terminate_session,
+    get_session_info,
+    list_active_sessions,
 )
 from src.mcp.tools.github import create_model_pr_with_2commit_strategy
 
@@ -48,9 +51,6 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastMCP server
 mcp = FastMCP("AI Research Automation Agent")
-
-# In-memory storage for pending experiments (TODO: Move to Redis for production)
-pending_experiments: Dict[str, PendingExperiment] = {}
 
 
 @mcp.tool()
@@ -164,294 +164,8 @@ async def cleanup_experiment_resources(
 
 
 # ==============================================================================
-# NEW WORKFLOW: Draft PR -> Approval -> Experiment
+# SIMPLIFIED WORKFLOW: Direct Experiment Execution
 # ==============================================================================
-
-
-@mcp.tool()
-async def create_draft_pr_for_review(
-    ctx: Context,
-    spec: TechSpec = Field(..., description="Analyzed technical specification"),
-    implementation: Dict[str, Any] = Field(..., description="Generated implementation"),
-) -> Dict[str, Any]:
-    """
-    Create a Draft PR for user review before running experiment.
-
-    This is Step 3 of the workflow. After this:
-    1. User reviews the Draft PR
-    2. User calls approve_and_run_experiment to start the experiment
-
-    Returns experiment_id to track this pending experiment.
-    """
-    experiment_id = str(uuid.uuid4())[:8]
-    logger.info(f"Creating Draft PR for experiment {experiment_id}: {spec.title}")
-
-    try:
-        # Determine PR strategy and create PR
-        pr_strategy = implementation.get("pr_strategy", "new_implementation")
-        repository = implementation.get("repository", "ai-craft")
-
-        if pr_strategy == "model_modification" and implementation.get("reference_path"):
-            # Use 2-commit strategy for model modifications
-            reference_name = implementation.get("reference_name", "")
-            new_model_name = implementation.get("implementation_path", "").rstrip("/").split("/")[-1]
-
-            # Extract modifications from generated content
-            modifications = _extract_modifications(implementation, reference_name, new_model_name, spec)
-
-            pr_result = await create_model_pr_with_2commit_strategy(
-                repo_name=repository,
-                reference_path=implementation.get("reference_path"),
-                destination_path=implementation.get("implementation_path"),
-                reference_name=reference_name,
-                new_name=new_model_name,
-                modifications=modifications,
-                pr_title=f"[AI Agent] {spec.title}",
-                pr_description=spec.content[:500],
-                draft=True
-            )
-        else:
-            # Standard PR creation
-            evaluation = {"passed": None, "task_type": spec.task_type}  # No evaluation yet
-            pr_result = await manage_pr(implementation, evaluation, auto_merge=False)
-
-        # Generate training command for display
-        module_path = convert_path_to_module(implementation.get("implementation_path", ""))
-        utc_time = get_utc_time_hours_ago(4)
-        training_cmd = generate_training_command(module_path, utc_time) if spec.task_type == "MODEL_TRAINING" else None
-
-        # Store pending experiment
-        pending = PendingExperiment(
-            experiment_id=experiment_id,
-            state=ExperimentState.DRAFT_PR_CREATED,
-            spec=spec,
-            implementation=implementation,
-            pr_url=pr_result.get("pr_url", ""),
-            pr_number=pr_result.get("pr_number", 0),
-            branch_name=pr_result.get("branch_name", implementation.get("branch_name", "")),
-            training_command=training_cmd,
-            module_path=module_path,
-        )
-        pending_experiments[experiment_id] = pending
-
-        logger.info(f"Draft PR created: {pr_result.get('pr_url')}")
-
-        return {
-            "experiment_id": experiment_id,
-            "state": ExperimentState.DRAFT_PR_CREATED.value,
-            "pr_url": pr_result.get("pr_url"),
-            "pr_number": pr_result.get("pr_number"),
-            "branch_name": pending.branch_name,
-            "training_command": training_cmd,
-            "message": "Draft PR created. Review the PR and call approve_and_run_experiment to start.",
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to create Draft PR: {e}")
-        return {
-            "experiment_id": experiment_id,
-            "state": "error",
-            "error": str(e),
-        }
-
-
-@mcp.tool()
-async def list_pending_experiments(
-    ctx: Context,
-) -> List[Dict[str, Any]]:
-    """
-    List all experiments waiting for user approval.
-
-    Returns list of pending experiments with their PR URLs and states.
-    """
-    result = []
-    for exp_id, exp in pending_experiments.items():
-        result.append({
-            "experiment_id": exp_id,
-            "state": exp.state,
-            "title": exp.spec.title,
-            "pr_url": exp.pr_url,
-            "pr_number": exp.pr_number,
-            "branch_name": exp.branch_name,
-            "task_type": exp.spec.task_type,
-            "training_command": exp.training_command,
-            "created_at": exp.created_at.isoformat(),
-        })
-    return result
-
-
-@mcp.tool()
-async def approve_and_run_experiment(
-    ctx: Context,
-    experiment_id: str = Field(..., description="Experiment ID from create_draft_pr_for_review"),
-    gpu_enabled: bool = Field(default=True, description="Whether to use GPU (default: True for model training)"),
-    selected_steps: list[str] = Field(
-        default=["train"],
-        description="Workflow steps to execute. Default is ['train'] only. "
-                   "Options: 'dataset', 'train', 'calibrate_m3', 'calibrate_m1', 'mark_success', 'validation'. "
-                   "Example: ['train', 'calibrate_m3'] to run training and calibration."
-    ),
-) -> Dict[str, Any]:
-    """
-    Approve a pending experiment and run it on K8s.
-
-    Call this after reviewing the Draft PR.
-    This will:
-    1. Launch a K8s pod (GPU for model training)
-    2. Clone the repo and checkout the PR branch
-    3. Run the selected workflow steps (default: train only)
-    4. Collect metrics and return results
-
-    Available steps:
-    - dataset: Create dataset (required for whisky/wheres models)
-    - train: Run model training
-    - calibrate_m3: Run calibration (cal_m3)
-    - calibrate_m1: Run calibration (cal_m1)
-    - mark_success: Mark model as successful
-    - validation: Run model validation
-
-    By default, only 'train' is executed. Add more steps as needed.
-    """
-    if experiment_id not in pending_experiments:
-        return {
-            "error": f"Experiment {experiment_id} not found",
-            "available_experiments": list(pending_experiments.keys()),
-        }
-
-    pending = pending_experiments[experiment_id]
-
-    if pending.state != ExperimentState.DRAFT_PR_CREATED:
-        return {
-            "error": f"Experiment {experiment_id} is not in DRAFT_PR_CREATED state",
-            "current_state": pending.state,
-        }
-
-    logger.info(f"Approving and running experiment {experiment_id}: {pending.spec.title}")
-
-    # Update state
-    pending.state = ExperimentState.APPROVED
-    pending_experiments[experiment_id] = pending
-
-    try:
-        # Determine GPU requirement
-        use_gpu = gpu_enabled or pending.spec.task_type == "MODEL_TRAINING"
-
-        # Update state to running
-        pending.state = ExperimentState.RUNNING
-        pending_experiments[experiment_id] = pending
-
-        # Run the experiment with selected steps
-        result = await run_experiment(
-            implementation=pending.implementation,
-            spec=pending.spec,
-            gpu_enabled=use_gpu,
-            selected_steps=selected_steps,
-        )
-
-        # Update result with PR info
-        result.pr_url = pending.pr_url
-
-        # Update state based on result
-        if result.status == "SUCCESS":
-            pending.state = ExperimentState.COMPLETED
-        else:
-            pending.state = ExperimentState.FAILED
-        pending_experiments[experiment_id] = pending
-
-        logger.info(f"Experiment {experiment_id} completed with status: {result.status}")
-
-        return {
-            "experiment_id": experiment_id,
-            "state": pending.state.value if hasattr(pending.state, 'value') else pending.state,
-            "status": result.status,
-            "metrics": result.metrics,
-            "pr_url": pending.pr_url,
-            "pod_name": result.pod_name,
-            "recommendations": result.recommendations,
-            "training_command": pending.training_command,
-        }
-
-    except Exception as e:
-        logger.error(f"Experiment {experiment_id} failed: {e}")
-        pending.state = ExperimentState.FAILED
-        pending_experiments[experiment_id] = pending
-
-        return {
-            "experiment_id": experiment_id,
-            "state": ExperimentState.FAILED.value,
-            "error": str(e),
-        }
-
-
-@mcp.tool()
-async def cancel_pending_experiment(
-    ctx: Context,
-    experiment_id: str = Field(..., description="Experiment ID to cancel"),
-    cleanup_pr: bool = Field(default=False, description="Also close PR and delete branch"),
-) -> Dict[str, Any]:
-    """
-    Cancel a pending experiment.
-
-    Optionally cleans up the Draft PR and branch.
-    """
-    if experiment_id not in pending_experiments:
-        return {"error": f"Experiment {experiment_id} not found"}
-
-    pending = pending_experiments[experiment_id]
-
-    # Update state
-    pending.state = ExperimentState.CANCELLED
-    pending_experiments[experiment_id] = pending
-
-    result = {
-        "experiment_id": experiment_id,
-        "state": ExperimentState.CANCELLED.value,
-        "message": "Experiment cancelled",
-    }
-
-    if cleanup_pr:
-        cleanup_result = await cleanup_resources(experiment_id, cleanup_pr=True)
-        result["cleanup"] = cleanup_result
-
-    logger.info(f"Experiment {experiment_id} cancelled")
-    return result
-
-
-def _extract_modifications(
-    implementation: Dict[str, Any],
-    reference_name: str,
-    new_name: str,
-    spec: TechSpec = None
-) -> Dict[str, Dict[str, str]]:
-    """Extract modifications from implementation for 2-commit strategy.
-
-    For whisky models, common modifications include:
-    - Simplifying dcn_v2_linear_unit_list to 2 layers
-    - Adjusting network architecture
-    """
-    modifications = {}
-
-    # Check if spec has specific modifications requested
-    if spec and hasattr(spec, 'requirements') and spec.requirements:
-        mods = spec.requirements.get('modifications', [])
-
-        # For layer simplification (e.g., "dcn_v2_linear_unit_list를 2 layer로 간소화")
-        if 'simplify_layers' in mods or 'reduce_to_2_layers' in mods:
-            # Modify conf.py to reduce layers
-            # base_clk_dcn24 has [1024, 512, 256] (3 layers) at line 1372
-            # Reduce to 2 layers as requested
-            modifications['conf.py'] = {
-                "self.dcn_v2_linear_unit_list = [1024, 512, 256]": "self.dcn_v2_linear_unit_list = [512, 256]",
-            }
-
-    # If no specific modifications but we have generated files, extract diffs
-    if not modifications and implementation.get('files'):
-        # Compare generated files with reference to find differences
-        # This would require loading the reference files and comparing
-        # For now, use the generated content to find modifications
-        pass
-
-    return modifications
 
 
 @mcp.tool()
@@ -460,18 +174,15 @@ async def run_full_workflow(
     request: ExperimentRequest = Field(..., description="Complete experiment request"),
 ) -> Dict[str, Any]:
     """
-    Run workflow up to Draft PR creation (stops for user approval).
+    Run simplified workflow: analyze, generate, and execute experiment.
 
     Steps:
     1. Analyze technical specification
     2. Generate code implementation
-    3. Create Draft PR for review
+    3. Launch experiment immediately (no PR yet)
+    4. Return results
 
-    After this, user should:
-    4. Review the Draft PR
-    5. Call approve_and_run_experiment(experiment_id) to run the experiment
-
-    For auto-run without approval, use run_full_workflow_auto.
+    After experiment completes, user can optionally create PR using create_pull_request.
     """
     logger.info(f"Starting workflow for: {request.spec_url}")
 
@@ -482,23 +193,26 @@ async def run_full_workflow(
         # Step 2: Generate code
         implementation = await generate_code(spec, request.repo)
 
-        # Step 3: Create Draft PR (stops here for user approval)
-        draft_result = await create_draft_pr_for_review(ctx, spec, implementation)
+        # Step 3: Launch experiment directly
+        result = await run_experiment(implementation, spec, request.gpu_enabled)
+
+        # Step 4: Evaluate results
+        evaluation = await evaluate_results(result, spec)
 
         return {
-            "experiment_id": draft_result.get("experiment_id"),
-            "state": draft_result.get("state"),
-            "pr_url": draft_result.get("pr_url"),
-            "pr_number": draft_result.get("pr_number"),
-            "branch_name": draft_result.get("branch_name"),
-            "training_command": draft_result.get("training_command"),
+            "experiment_id": result.experiment_id,
+            "status": result.status,
             "spec": spec.model_dump(),
+            "evaluation": evaluation,
+            "metrics": result.metrics,
+            "pod_name": result.pod_name,
+            "recommendations": result.recommendations,
             "message": (
-                "Draft PR created. Review the PR and run:\n"
-                f"  approve_and_run_experiment(experiment_id='{draft_result.get('experiment_id')}')\n"
-                "to start the experiment."
+                f"Experiment {result.experiment_id} completed.\n"
+                f"Status: {result.status}\n"
+                f"Use create_pull_request(experiment_id='{result.experiment_id}') to create a PR."
             ),
-            "next_step": "approve_and_run_experiment",
+            "next_step": "create_pull_request (optional)",
         }
 
     except Exception as e:
@@ -578,6 +292,359 @@ async def get_metrics(metric_type: str) -> str:
     """Get specific system metrics."""
     # TODO: Implement metrics collection
     return f"Metrics for {metric_type} not yet implemented"
+
+
+# ==============================================================================
+# SESSION MANAGEMENT: Multi-Experiment Pod Reuse
+# ==============================================================================
+
+
+@mcp.tool()
+async def start_experiment_session(
+    ctx: Context,
+    task_description: str = Field(..., description="Description of the task (e.g., 'Experiment with whisky mtl models')"),
+    gpu_enabled: bool = Field(default=True, description="Whether to use GPU (default: True)"),
+) -> Dict[str, Any]:
+    """
+    Start an experiment session with a persistent pod.
+
+    The pod remains active across multiple experiments until explicitly terminated.
+    Use this for running multiple experiments sequentially without recreating the pod.
+
+    Returns:
+        session_id to use for subsequent experiments
+    """
+    from src.mcp.tools import analyze_spec
+
+    logger.info(f"Starting experiment session for: {task_description}")
+
+    try:
+        # Analyze spec to determine requirements
+        spec = await analyze_spec(task_description)
+
+        # Create session with pod
+        session = await create_session(spec, gpu_enabled)
+
+        return {
+            "session_id": session.session_id,
+            "pod_name": session.pod_name,
+            "pod_type": session.pod_type,
+            "instance_type": session.instance_type,
+            "status": session.status.value,
+            "message": (
+                f"Session started!\n"
+                f"Session ID: {session.session_id}\n"
+                f"Pod: {session.pod_name}\n"
+                f"Type: {session.pod_type} ({session.instance_type})\n\n"
+                f"Use run_in_session(session_id='{session.session_id}', ...) to run experiments."
+            ),
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to start session: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+        }
+
+
+@mcp.tool()
+async def run_in_session(
+    ctx: Context,
+    session_id: str = Field(..., description="Session ID from start_experiment_session"),
+    experiment_description: str = Field(..., description="Description of the experiment to run"),
+) -> Dict[str, Any]:
+    """
+    Run an experiment in an existing session.
+
+    Uses the already-running pod from the session.
+    No new pod is created, allowing for faster iteration.
+
+    Returns:
+        Experiment result with metrics
+    """
+    from src.mcp.tools import analyze_spec, generate_code
+
+    logger.info(f"Running experiment in session {session_id}: {experiment_description}")
+
+    try:
+        # Analyze spec
+        spec = await analyze_spec(experiment_description)
+
+        # Generate code
+        implementation = await generate_code(spec)
+
+        # Run experiment in session
+        result = await run_experiment_in_session(session_id, implementation, spec)
+
+        return {
+            "experiment_id": result.experiment_id,
+            "session_id": session_id,
+            "status": result.status,
+            "metrics": result.metrics,
+            "pod_name": result.pod_name,
+            "recommendations": result.recommendations,
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to run experiment in session {session_id}: {e}")
+        return {
+            "session_id": session_id,
+            "status": "error",
+            "error": str(e),
+        }
+
+
+@mcp.tool()
+async def stop_session(
+    ctx: Context,
+    session_id: str = Field(..., description="Session ID to terminate"),
+) -> Dict[str, Any]:
+    """
+    Terminate a session and cleanup its pod.
+
+    After calling this, the session cannot be reused.
+    """
+    logger.info(f"Terminating session {session_id}")
+
+    result = await terminate_session(session_id)
+
+    return result
+
+
+@mcp.tool()
+async def get_session_status(
+    ctx: Context,
+    session_id: str = Field(..., description="Session ID"),
+) -> Dict[str, Any]:
+    """
+    Get information about a session.
+
+    Returns:
+        Session details including pod info, experiments run, etc.
+    """
+    info = await get_session_info(session_id)
+
+    if info is None:
+        return {
+            "error": f"Session not found: {session_id}",
+        }
+
+    return info
+
+
+@mcp.tool()
+async def list_sessions(
+    ctx: Context,
+) -> List[Dict[str, Any]]:
+    """
+    List all active experiment sessions.
+
+    Returns:
+        List of active sessions with their details
+    """
+    sessions = await list_active_sessions()
+
+    return sessions
+
+
+@mcp.tool()
+async def run_batch_experiments(
+    ctx: Context,
+    base_task_description: str = Field(
+        ...,
+        description="Base task description (e.g., 'Create mtl02 model based on mtl01 with learning rate {lr}')"
+    ),
+    hyperparameter_grid: Dict[str, List[str]] = Field(
+        ...,
+        description="Hyperparameter combinations to test. Example: {'lr': ['0.1', '0.01', '0.001'], 'layers': ['2', '3']}"
+    ),
+    use_single_pod: bool = Field(default=True, description="Use single pod for all experiments (sequential execution)"),
+    gpu_enabled: bool = Field(default=True, description="Whether to use GPU"),
+) -> Dict[str, Any]:
+    """
+    Run batch experiments with different hyperparameters.
+
+    Generates all combinations of hyperparameters and runs experiments sequentially.
+    If use_single_pod=True, creates one session and runs all experiments on the same pod.
+
+    Example:
+        base_task_description: "Test whisky mtl model with lr={lr} and layers={layers}"
+        hyperparameter_grid: {"lr": ["0.1", "0.01"], "layers": ["2", "3"]}
+
+        This will run 4 experiments:
+        1. lr=0.1, layers=2
+        2. lr=0.1, layers=3
+        3. lr=0.01, layers=2
+        4. lr=0.01, layers=3
+
+    Returns:
+        Batch results with all experiments and best performing configuration
+    """
+    from itertools import product
+    from src.mcp.tools import analyze_spec, generate_code
+
+    logger.info(f"Starting batch experiments for: {base_task_description}")
+    logger.info(f"Hyperparameter grid: {hyperparameter_grid}")
+
+    # Generate all combinations
+    keys = list(hyperparameter_grid.keys())
+    values = list(hyperparameter_grid.values())
+    combinations = list(product(*values))
+
+    logger.info(f"Total combinations to test: {len(combinations)}")
+
+    results = []
+    session_id = None
+
+    try:
+        # Create session if using single pod
+        if use_single_pod:
+            base_spec = await analyze_spec(base_task_description)
+            session = await create_session(base_spec, gpu_enabled)
+            session_id = session.session_id
+            logger.info(f"Created session {session_id} for batch experiments")
+
+        # Run each combination
+        for i, combination in enumerate(combinations, 1):
+            # Create parameter dict
+            param_dict = dict(zip(keys, combination))
+
+            # Format task description with parameters
+            task_description = base_task_description
+            for key, value in param_dict.items():
+                task_description = task_description.replace(f"{{{key}}}", str(value))
+
+            logger.info(f"Running experiment {i}/{len(combinations)}: {param_dict}")
+
+            try:
+                # Analyze spec
+                spec = await analyze_spec(task_description)
+
+                # Generate code
+                implementation = await generate_code(spec)
+
+                # Run experiment
+                if use_single_pod and session_id:
+                    result = await run_experiment_in_session(session_id, implementation, spec)
+                else:
+                    result = await run_experiment(implementation, spec, gpu_enabled)
+
+                results.append({
+                    "parameters": param_dict,
+                    "experiment_id": result.experiment_id,
+                    "status": result.status,
+                    "metrics": result.metrics,
+                    "recommendations": result.recommendations,
+                })
+
+                logger.info(
+                    f"Experiment {i} completed: "
+                    f"AUC={result.metrics.get('auc', 'N/A')}, "
+                    f"LogLoss={result.metrics.get('logloss', 'N/A')}"
+                )
+
+            except Exception as e:
+                logger.error(f"Experiment {i} failed: {e}")
+                results.append({
+                    "parameters": param_dict,
+                    "status": "error",
+                    "error": str(e),
+                })
+
+        # Cleanup session if created
+        if session_id:
+            await terminate_session(session_id)
+
+        # Find best result
+        successful_results = [r for r in results if r.get("status") == "SUCCESS"]
+        if successful_results:
+            best_result = max(
+                successful_results,
+                key=lambda r: r["metrics"].get("auc", 0)
+            )
+        else:
+            best_result = None
+
+        return {
+            "total_experiments": len(combinations),
+            "successful": len(successful_results),
+            "failed": len(combinations) - len(successful_results),
+            "results": results,
+            "best_result": best_result,
+            "session_id": session_id,
+            "message": (
+                f"Batch experiments completed: {len(successful_results)}/{len(combinations)} successful.\n"
+                f"Best config: {best_result['parameters'] if best_result else 'None'}"
+            )
+        }
+
+    except Exception as e:
+        logger.error(f"Batch experiment failed: {e}")
+
+        # Cleanup session on error
+        if session_id:
+            try:
+                await terminate_session(session_id)
+            except:
+                pass
+
+        return {
+            "status": "error",
+            "error": str(e),
+            "completed": len(results),
+            "results": results,
+        }
+
+
+# ==============================================================================
+# PULL REQUEST CREATION (After Experiment)
+# ==============================================================================
+
+
+@mcp.tool()
+async def create_pull_request(
+    ctx: Context,
+    experiment_id: str = Field(..., description="Experiment ID to create PR for"),
+    auto_merge: bool = Field(default=False, description="Auto-merge if evaluation passed"),
+) -> Dict[str, Any]:
+    """
+    Create a pull request for a completed experiment.
+
+    Call this after running an experiment (via run_experiment, run_in_session, etc.)
+    to create a PR with the experiment code and results.
+
+    Args:
+        experiment_id: ID of the completed experiment
+        auto_merge: Automatically merge if experiment passed evaluation
+
+    Returns:
+        PR information (URL, number, etc.)
+    """
+    logger.info(f"Creating PR for experiment {experiment_id}")
+
+    try:
+        # For now, return a placeholder
+        # TODO: Implement actual PR creation using manage_pr
+        # This requires tracking experiment implementations
+
+        return {
+            "experiment_id": experiment_id,
+            "status": "pending",
+            "message": (
+                f"PR creation for experiment {experiment_id} is not yet implemented.\n"
+                "Currently, experiments run without creating PRs automatically.\n"
+                "You can manually create a PR from the experiment branch if needed."
+            ),
+            "note": "This feature will be implemented in a future update."
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to create PR for experiment {experiment_id}: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+        }
 
 
 if __name__ == "__main__":

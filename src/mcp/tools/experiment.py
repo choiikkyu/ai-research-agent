@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 import uuid
 
 from src.core.config import settings
-from src.core.models import TechSpec, ExperimentResult
+from src.core.models import TechSpec, ExperimentResult, ExperimentSession, SessionStatus
 from src.k8s.pod_launcher import K8sPodLauncher
 from src.mcp.tools.workflow_parser import (
     WorkflowParser,
@@ -30,6 +30,11 @@ from src.mcp.tools.workflow_parser import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ===== Session Management (In-Memory) =====
+
+_active_sessions: Dict[str, ExperimentSession] = {}
 
 
 def get_utc_time_hours_ago(hours: int = 4) -> str:
@@ -425,3 +430,236 @@ def generate_recommendations(
         )
 
     return recommendations if recommendations else ["No specific recommendations."]
+
+
+# ===== Session Management Functions =====
+
+
+async def create_session(
+    spec: TechSpec,
+    gpu_enabled: bool = False
+) -> ExperimentSession:
+    """
+    Create an experiment session with a persistent pod.
+
+    The pod remains active for running multiple experiments sequentially.
+
+    Args:
+        spec: Technical specification
+        gpu_enabled: Whether to use GPU
+
+    Returns:
+        Created ExperimentSession
+    """
+    session_id = str(uuid.uuid4())[:8]
+    logger.info(f"Creating session {session_id} for {spec.title}")
+
+    launcher = K8sPodLauncher()
+
+    # Determine resource requirements
+    if spec.task_type == "MODEL_TRAINING" or gpu_enabled:
+        pod_type = "gpu"
+        instance_type = settings.default_gpu_instance
+    else:
+        pod_type = "cpu"
+        instance_type = settings.default_cpu_instance
+
+    pod_name = f"ai-tf-box-session-{session_id}"
+
+    try:
+        # Launch pod
+        logger.info(f"Launching {pod_type} pod for session: {pod_name}")
+        pod_info = await launcher.launch_pod(
+            pod_name=pod_name,
+            pod_type=pod_type,
+            instance_type=instance_type
+        )
+
+        session = ExperimentSession(
+            session_id=session_id,
+            pod_name=pod_name,
+            status=SessionStatus.ACTIVE,
+            pod_type=pod_type,
+            instance_type=instance_type
+        )
+
+        _active_sessions[session_id] = session
+        logger.info(f"Session {session_id} created with pod {pod_name}")
+
+        return session
+
+    except Exception as e:
+        logger.error(f"Failed to create session {session_id}: {str(e)}")
+        raise
+
+
+async def run_experiment_in_session(
+    session_id: str,
+    implementation: Dict[str, Any],
+    spec: TechSpec,
+    selected_steps: Optional[list[str]] = None
+) -> ExperimentResult:
+    """
+    Run an experiment in an existing session.
+
+    Uses the already-running pod from the session.
+
+    Args:
+        session_id: Session ID
+        implementation: Generated code implementation
+        spec: Technical specification
+        selected_steps: Workflow steps to execute
+
+    Returns:
+        ExperimentResult with metrics and status
+    """
+    if session_id not in _active_sessions:
+        raise ValueError(f"Session not found: {session_id}")
+
+    session = _active_sessions[session_id]
+
+    if session.status != SessionStatus.ACTIVE:
+        raise ValueError(f"Session {session_id} is not active (status: {session.status})")
+
+    experiment_id = str(uuid.uuid4())[:8]
+    logger.info(f"Running experiment {experiment_id} in session {session_id}")
+
+    launcher = K8sPodLauncher()
+
+    try:
+        # Prepare experiment script
+        experiment_script = prepare_experiment_script(
+            implementation, spec, selected_steps=selected_steps
+        )
+
+        # Execute on existing pod
+        logger.info(f"Executing experiment on session pod {session.pod_name}")
+        execution_result = await launcher.execute_on_pod(
+            pod_name=session.pod_name,
+            script=experiment_script
+        )
+
+        # Collect metrics
+        metrics = await collect_metrics(experiment_id, spec.task_type)
+
+        # Create result
+        result = ExperimentResult(
+            experiment_id=experiment_id,
+            status="SUCCESS" if execution_result.get("success") else "FAILURE",
+            metrics=metrics,
+            pr_url=None,
+            pod_name=session.pod_name,
+            recommendations=generate_recommendations(metrics, spec.task_type)
+        )
+
+        # Track experiment in session
+        session.experiment_ids.append(experiment_id)
+
+        logger.info(f"Experiment {experiment_id} completed in session {session_id}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Experiment {experiment_id} failed in session {session_id}: {str(e)}")
+
+        # Return failure result
+        return ExperimentResult(
+            experiment_id=experiment_id,
+            status="FAILURE",
+            metrics={},
+            pr_url=None,
+            pod_name=session.pod_name,
+            recommendations=[f"Experiment failed: {str(e)}"]
+        )
+
+
+async def terminate_session(session_id: str) -> Dict[str, str]:
+    """
+    Terminate a session and cleanup its pod.
+
+    Args:
+        session_id: Session ID to terminate
+
+    Returns:
+        Status message
+    """
+    if session_id not in _active_sessions:
+        logger.warning(f"Session not found: {session_id}")
+        return {"status": "error", "message": f"Session not found: {session_id}"}
+
+    session = _active_sessions[session_id]
+    launcher = K8sPodLauncher()
+
+    try:
+        # Cleanup pod
+        logger.info(f"Terminating session {session_id}, cleaning up pod {session.pod_name}")
+        await launcher.cleanup_pod(session.pod_name)
+
+        # Update session status
+        session.status = SessionStatus.TERMINATED
+
+        # Remove from active sessions
+        del _active_sessions[session_id]
+
+        logger.info(f"Session {session_id} terminated successfully")
+        return {
+            "status": "success",
+            "message": f"Session {session_id} terminated",
+            "experiments_run": len(session.experiment_ids)
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to terminate session {session_id}: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Failed to terminate session: {str(e)}"
+        }
+
+
+async def get_session_info(session_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Get information about a session.
+
+    Args:
+        session_id: Session ID
+
+    Returns:
+        Session information dict or None if not found
+    """
+    if session_id not in _active_sessions:
+        return None
+
+    session = _active_sessions[session_id]
+
+    return {
+        "session_id": session.session_id,
+        "pod_name": session.pod_name,
+        "status": session.status.value,
+        "created_at": session.created_at.isoformat(),
+        "experiments_run": len(session.experiment_ids),
+        "experiment_ids": session.experiment_ids,
+        "pod_type": session.pod_type,
+        "instance_type": session.instance_type
+    }
+
+
+async def list_active_sessions() -> list[Dict[str, Any]]:
+    """
+    List all active sessions.
+
+    Returns:
+        List of session information dicts
+    """
+    sessions = []
+
+    for session_id, session in _active_sessions.items():
+        sessions.append({
+            "session_id": session_id,
+            "pod_name": session.pod_name,
+            "status": session.status.value,
+            "created_at": session.created_at.isoformat(),
+            "experiments_run": len(session.experiment_ids),
+            "pod_type": session.pod_type,
+            "instance_type": session.instance_type
+        })
+
+    return sessions

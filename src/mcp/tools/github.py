@@ -698,3 +698,134 @@ def _normalize_github_path(path: str) -> str:
         path = path.replace(char, "_")
 
     return path
+
+
+# =============================================================================
+# PR CREATION AFTER EXPERIMENT
+# =============================================================================
+
+
+async def create_pr_after_experiment(
+    repo_name: str,
+    branch_name: str,
+    experiment_id: str,
+    evaluation: Dict[str, Any],
+    implementation: Dict[str, Any],
+    spec_title: str,
+    spec_content: str = ""
+) -> Dict[str, Any]:
+    """
+    Create a pull request after experiment completion.
+
+    This is called when user explicitly requests a PR after running experiments.
+
+    Args:
+        repo_name: Repository name (e.g., "ai-craft")
+        branch_name: Git branch name with experiment code
+        experiment_id: Experiment identifier
+        evaluation: Evaluation results from evaluator
+        implementation: Implementation details (files, etc.)
+        spec_title: Title of the experiment
+        spec_content: Content/description of the experiment
+
+    Returns:
+        PR information (URL, number, etc.)
+    """
+    logger.info(f"Creating PR for experiment {experiment_id} on branch {branch_name}")
+
+    try:
+        g = Github(settings.github_token.get_secret_value())
+        repo = g.get_repo(f"{settings.github_org}/{repo_name}")
+
+        # Check if branch exists
+        try:
+            repo.get_branch(branch_name)
+        except GithubException as e:
+            if e.status == 404:
+                logger.warning(f"Branch {branch_name} not found, cannot create PR")
+                return {
+                    "status": "error",
+                    "error": f"Branch {branch_name} not found in repository",
+                    "message": "Ensure the experiment code has been pushed to GitHub"
+                }
+            raise
+
+        # Determine PR title and description
+        passed = evaluation.get("passed", False)
+        status_icon = "✅" if passed else "❌"
+
+        pr_title = f"[AI Agent] {spec_title}"
+
+        # Build PR description
+        pr_description = f"""## Experiment Results {status_icon}
+
+**Experiment ID:** {experiment_id}
+**Status:** {'PASSED' if passed else 'FAILED'}
+
+### Metrics
+"""
+        # Add metrics to description
+        metrics = evaluation.get("metrics", {})
+        if metrics:
+            for metric_name, value in metrics.items():
+                pr_description += f"- **{metric_name}**: {value}\n"
+
+        # Add evaluation details
+        details = evaluation.get("details", {})
+        if details:
+            pr_description += "\n### Evaluation Details\n"
+            for detail_name, detail_info in details.items():
+                pr_description += f"- **{detail_name}**: {detail_info.get('message', 'N/A')}\n"
+
+        # Add recommendations
+        recommendations = evaluation.get("recommendations", [])
+        if recommendations:
+            pr_description += "\n### Recommendations\n"
+            for rec in recommendations:
+                pr_description += f"- {rec}\n"
+
+        pr_description += f"\n---\n\n{spec_content[:1000]}"
+
+        # Create PR
+        pr = repo.create_pull_request(
+            title=pr_title,
+            body=pr_description,
+            head=branch_name,
+            base="main"
+        )
+
+        # Add labels
+        labels = _get_pr_labels(repo_name)
+        if labels:
+            pr.add_to_labels(*labels)
+
+        # Add status label
+        if passed:
+            pr.add_to_labels("experiment-passed")
+        else:
+            pr.add_to_labels("experiment-failed")
+
+        logger.info(f"PR created: {pr.html_url}")
+
+        return {
+            "status": "success",
+            "pr_url": pr.html_url,
+            "pr_number": pr.number,
+            "branch_name": branch_name,
+            "title": pr_title,
+            "experiment_id": experiment_id,
+            "evaluation_passed": passed,
+        }
+
+    except GithubException as e:
+        logger.error(f"GitHub API error: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+        }
+    except Exception as e:
+        logger.error(f"Failed to create PR: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+        }
