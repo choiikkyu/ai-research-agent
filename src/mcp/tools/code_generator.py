@@ -169,36 +169,81 @@ class PatternBasedCodeGenerator:
         prompt_parts.append(f"Repository: {context['repo_name']}\n")
         prompt_parts.append(f"\n## Requirements\n{spec.content}\n")
 
-        # Reference implementation
+        # Model structure information (NEW - highest priority)
+        if context.get("model_structure"):
+            structure = context["model_structure"]
+            prompt_parts.append(f"\n## Model Domain: {structure['domain'].upper()}\n")
+
+            prompt_parts.append(f"### Detected Structure\n")
+            prompt_parts.append(f"**Common Code Location:** `{structure['common_path']}`\n")
+            prompt_parts.append(f"**Config Location:** `{structure['config_path']}`\n")
+            prompt_parts.append(f"**Reference Model:** `{structure['reference_name']}`\n")
+
+            # Actual file lists (dynamically detected)
+            if structure.get("common_files"):
+                prompt_parts.append(f"\n**Common Files** ({len(structure['common_files'])} files):\n")
+                for f in structure['common_files']:
+                    prompt_parts.append(f"  - `{f}`\n")
+
+            if structure.get("config_files"):
+                prompt_parts.append(f"\n**Config Files** ({len(structure['config_files'])} files):\n")
+                for f in structure['config_files']:
+                    prompt_parts.append(f"  - `{f}`\n")
+
+        # Critical naming instructions
+        ref_name = context.get("model_structure", {}).get("reference_name", "old_model")
+        new_name = spec.requirements.get("new_model_name", "new_model") if hasattr(spec, 'requirements') and spec.requirements else "new_model"
+
+        prompt_parts.append(f"""
+## ⚠️ CRITICAL INSTRUCTIONS: Naming Convention
+
+You must create a new model by copying the reference model structure.
+
+**Reference Model:** `{ref_name}`
+**New Model:** `{new_name}`
+
+### Required Actions:
+1. **Copy ALL files** from common code location to new location
+2. **Replace `{ref_name}` with `{new_name}` EVERYWHERE:**
+   - File paths
+   - Directory names
+   - Import statements (e.g., `from ...{ref_name} import`)
+   - Class names (if they contain `{ref_name}`)
+   - Variable names (if they contain `{ref_name}`)
+3. **Create config files** in the appropriate location with new hyperparameters
+
+### Example:
+```
+OLD: from dable_ai_craft.dsp_models.whisky_v1.common.nn.{ref_name} import trainer
+NEW: from dable_ai_craft.dsp_models.whisky_v1.common.nn.{new_name} import trainer
+
+OLD: src/dable_ai_craft/dsp_models/whisky_v1/{ref_name}/conf.py
+NEW: src/dable_ai_craft/dsp_models/whisky_v1/{new_name}/conf.py
+```
+""")
+
+        # Reference implementation (actual code)
         if context.get("reference_path") and context.get("reference_files"):
-            prompt_parts.append(f"\n## Reference Implementation: {context['reference_path']}\n")
+            prompt_parts.append(f"\n## Reference Implementation\n")
             prompt_parts.append(
-                "Use this existing implementation as a template. "
+                "Use the existing implementation as a template. "
                 "Follow the same file structure, class patterns, and coding style.\n"
             )
 
-            # Directory structure
-            if context.get("directory_structure"):
-                prompt_parts.append("\n### Directory Structure\n```\n")
-                for item in context["directory_structure"]:
-                    icon = "📁" if item["type"] == "dir" else "📄"
-                    prompt_parts.append(f"{icon} {item['name']}\n")
-                prompt_parts.append("```\n")
-
-            # Reference files
+            # Reference files (show actual content)
             prompt_parts.append("\n### Reference Files\n")
             for filename, content in context["reference_files"].items():
-                # Truncate very long files
-                if len(content) > 3000:
-                    content = content[:3000] + "\n... (truncated)"
-                prompt_parts.append(f"\n#### {filename}\n```python\n{content}\n```\n")
+                # Smart truncation: don't cut in the middle of code blocks
+                if len(content) > 4000:
+                    content = content[:4000] + "\n\n... (truncated for brevity)"
+                prompt_parts.append(f"\n#### `{filename}`\n```python\n{content}\n```\n")
 
         # Generation instructions
         prompt_parts.append("\n## Instructions\n")
         prompt_parts.append(
-            "1. Create a new implementation following the same structure as the reference\n"
+            "1. Create a new implementation following the detected structure above\n"
             "2. Maintain the same file organization and naming conventions\n"
-            "3. Use the same base classes and imports where applicable\n"
+            "3. Apply ALL naming replacements ({ref_name} → {new_name}) consistently\n"
             "4. Apply the modifications described in the requirements\n"
             "5. Ensure all code is production-ready with proper error handling\n"
         )

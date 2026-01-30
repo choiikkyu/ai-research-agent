@@ -268,6 +268,117 @@ class GitHubCodeReference:
 
         return None
 
+    # ===== Model Structure Detection =====
+
+    def _extract_model_name(self, path: str) -> str:
+        """Extract model name from path.
+
+        Args:
+            path: Path like "src/.../dsp_models/whisky_v1/mtl01/" or ".../common/nn/mtl01/"
+
+        Returns:
+            Model name (e.g., "mtl01")
+        """
+        # Get the last non-empty directory name
+        parts = [p for p in path.split("/") if p]
+        if parts:
+            return parts[-1].rstrip("/")
+        return ""
+
+    async def detect_model_structure(
+        self,
+        repo_name: str,
+        reference_path: str
+    ) -> Dict[str, Any]:
+        """Analyze the actual structure of a reference model from GitHub.
+
+        This method dynamically discovers the model structure by:
+        1. Detecting the domain (whisky_v1 or vodka_v3)
+        2. Finding the common code location
+        3. Listing all actual files in both locations
+
+        Args:
+            repo_name: Repository name (ai-craft)
+            reference_path: Path to reference model (e.g., "src/.../whisky_v1/mtl01/")
+
+        Returns:
+            Dict with domain, paths, and actual file lists
+        """
+        logger.info(f"Detecting model structure for: {reference_path}")
+
+        # 1. Detect domain and determine common path
+        domain = None
+        common_path = None
+        model_name = self._extract_model_name(reference_path)
+
+        if "whisky_v1" in reference_path:
+            domain = "whisky_v1"
+            # whisky_v1/common/nn/{model_name}/
+            if "common/nn/" in reference_path:
+                # Already at common path, find config path
+                common_path = reference_path
+                config_path = reference_path.replace("/common/nn/", "/").rsplit("/", 1)[0] + "/" + model_name + "/"
+            else:
+                # At config path, find common path
+                config_path = reference_path
+                common_path = f"src/dable_ai_craft/dsp_models/whisky_v1/common/nn/{model_name}/"
+
+        elif "vodka_v3" in reference_path:
+            domain = "vodka_v3"
+            if "internal/per_country" in reference_path:
+                config_path = reference_path
+                common_path = f"src/dable_ai_craft/dsp_models/vodka_v3/common/nn_v2/{model_name}/"
+            elif "external/per_ssp" in reference_path:
+                config_path = reference_path
+                common_path = f"src/dable_ai_craft/dsp_models/vodka_v3/common/nn_v2/{model_name}/"
+            elif "common/nn_v2/" in reference_path:
+                common_path = reference_path
+                # Try internal first, then external
+                config_path = f"src/dable_ai_craft/dsp_models/vodka_v3/internal/per_country/{model_name}/"
+            else:
+                # Fallback
+                domain = "vodka_v3"
+                config_path = reference_path
+                common_path = f"src/dable_ai_craft/dsp_models/vodka_v3/common/nn_v2/{model_name}/"
+        else:
+            # Unknown domain, use as-is
+            logger.warning(f"Unknown domain in path: {reference_path}")
+            domain = "unknown"
+            config_path = reference_path
+            common_path = reference_path
+
+        # 2. List actual files in common location
+        common_files = []
+        try:
+            common_dir_contents = await self.list_directory(repo_name, common_path.rstrip('/'))
+            common_files = [f["name"] for f in common_dir_contents if f["type"] == "file"]
+        except Exception as e:
+            logger.warning(f"Could not list common directory {common_path}: {e}")
+
+        # 3. List actual files in config location
+        config_files = []
+        try:
+            config_dir_contents = await self.list_directory(repo_name, config_path.rstrip('/'))
+            config_files = [f["name"] for f in config_dir_contents if f["type"] == "file"]
+        except Exception as e:
+            logger.warning(f"Could not list config directory {config_path}: {e}")
+
+        structure = {
+            "domain": domain,
+            "common_path": common_path,
+            "config_path": config_path,
+            "common_files": sorted(common_files),
+            "config_files": sorted(config_files),
+            "reference_name": model_name
+        }
+
+        logger.info(
+            f"Detected structure - Domain: {domain}, "
+            f"Common files: {len(common_files)}, Config files: {len(config_files)}"
+        )
+
+        return structure
+
     # ===== Context Collection for Code Generation =====
 
     async def get_context_for_generation(
@@ -280,7 +391,7 @@ class GitHubCodeReference:
         """Collect context for code generation.
 
         This is the main method used by code generator to get:
-        1. CLAUDE.md conventions
+        1. Model structure (dynamically detected)
         2. Reference implementation files
 
         Args:
@@ -290,7 +401,7 @@ class GitHubCodeReference:
             keywords: Optional keywords for finding similar implementation
 
         Returns:
-            Context dict with conventions and reference files
+            Context dict with structure and reference files
         """
         context = {
             "repo_name": repo_name,
@@ -298,10 +409,11 @@ class GitHubCodeReference:
             "conventions": "",
             "reference_path": None,
             "reference_files": {},
-            "directory_structure": []
+            "directory_structure": [],
+            "model_structure": None
         }
 
-        # Level 1: CLAUDE.md (always load)
+        # Level 1: CLAUDE.md (always load, may be empty)
         context["conventions"] = await self.get_claude_md(repo_name)
 
         # Level 2: Find reference implementation
@@ -315,6 +427,14 @@ class GitHubCodeReference:
         if ref_path:
             context["reference_path"] = ref_path
 
+            # Detect model structure dynamically
+            try:
+                context["model_structure"] = await self.detect_model_structure(
+                    repo_name, ref_path
+                )
+            except Exception as e:
+                logger.warning(f"Failed to detect model structure: {e}")
+
             # Get directory structure
             context["directory_structure"] = await self.list_directory(
                 repo_name, ref_path
@@ -322,7 +442,7 @@ class GitHubCodeReference:
 
             # Load reference files
             context["reference_files"] = await self.get_directory_files(
-                repo_name, ref_path, max_files=5
+                repo_name, ref_path, max_files=10  # Increased to capture more files
             )
 
         logger.info(
