@@ -1,25 +1,20 @@
-# AI Research Automation Agent
+# AI Research Agent - Experiment Queue Manager
 
-Tech Spec 문서를 입력받아 모델 학습 코드 생성, 실험 실행, PR 관리까지 자동화하는 AI Agent입니다.
+실행 중인 K8s Pod에서 ML 모델 학습 실험을 순차적으로 실행하고, MLflow에 결과를 기록하는 MCP 서버입니다.
 
 ## Features
 
-- **모델 코드 자동 생성**: Tech spec 기반 패턴 매칭 코드 생성
-- **Draft PR 워크플로우**: PR 생성 후 사용자 승인을 받고 실험 실행
-- **실험 자동화**: K8s GPU/CPU Pod 자동 할당 및 실험 실행
-- **결과 평가**: 실험 결과 자동 평가 및 리포팅
-- **PR 관리**: GitHub PR 생성, 결과에 따른 자동 merge/delete
-- **Slack 연동**: Slack을 통한 간편한 인터페이스
+- **실험 큐 관리**: 여러 실험을 순차적으로 실행
+- **K8s Pod 활용**: 이미 실행 중인 Pod에서 학습 명령어 실행
+- **MLflow 연동**: 실험 메트릭 자동 수집 및 태그 기록
+- **자동 평가**: AUC, LogLoss, Calibration Error 기반 모델 평가
 
 ## Quick Start
 
 ### 1. 설치
 
 ```bash
-# UV 설치 (없는 경우)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 의존성 설치
 uv sync
 ```
 
@@ -27,100 +22,89 @@ uv sync
 
 ```bash
 cp .env.example .env
+# MLFLOW_TRACKING_URI, K8S_NAMESPACE 설정
 ```
 
-필수 환경변수:
-- `ANTHROPIC_API_KEY`: Claude API key
-- `GITHUB_TOKEN`: GitHub personal access token
-
-### 3. 실행
+### 3. MCP 서버 실행
 
 ```bash
-# MCP 서버 실행
-uv run python -m src.main
+uv run python -m src.mcp.server
 ```
 
-## Workflow (Model Training)
+## Workflow
 
-```
-1. analyze_tech_spec     - Notion spec 분석
-2. generate_implementation - 코드 생성 (2-commit strategy for model modifications)
-3. create_draft_pr       - Draft PR 생성
-         ↓
-   [사용자 PR 리뷰]
-         ↓
-4. approve_and_run_experiment - 승인 후 실험 실행
-         ↓
-   K8s GPU Pod에서 도메인별 실험 실행:
-   - DNA (vodka):  train() → calibrate_m3()
-   - Wheres (whisky): dataset → train() → calibrate_m3() → mark_success()
-         ↓
-5. evaluate_experiment   - 결과 평가
-6. finalize_pr           - PR 머지/종료
-```
+1. 사용자가 실행 중인 K8s pod name 제공 (namespace: tf-box)
+2. 실험 목록 제공 (각 실험의 명령어 + description)
+3. 시스템이 순차적으로 각 실험 실행
+4. 각 학습 완료 후 MLflow에서 메트릭 수집 → 평가 → description 기록
+5. 전체 결과 요약 제공
 
-### Domain-Specific Workflows
+## MCP Tools
 
-| Domain | Models | Dataset Required | Workflow |
-|--------|--------|------------------|----------|
-| **DNA** | vodka_v2, vodka_v3 | No | `train()` → `calibrate_m3()` |
-| **Wheres** | whisky_v1 | Yes (90일) | `dataset` → `train(local_training=True)` → `calibrate_m3()` → `mark_success()` |
+| Tool | Description |
+|------|-------------|
+| `submit_experiments` | 실험 배치 제출 (pod_name + experiments[]) |
+| `get_queue_status` | 큐 상태 확인 |
+| `get_experiment_results` | 결과 조회 |
+| `stop_batch` | 진행 중인 배치 중단 |
 
-
-## Usage
-
-### MCP Tools
+### 사용 예시
 
 ```python
-# 1. Draft PR 생성 (실험 대기)
-result = await run_full_workflow(request)
-# -> experiment_id, pr_url 반환
+# 실험 제출
+await submit_experiments(
+    pod_name="my-training-pod",
+    experiments=[
+        {
+            "description": "Baseline model",
+            "training_command": "cd /app && python train.py"
+        },
+        {
+            "description": "Higher learning rate",
+            "training_command": "cd /app && python train.py --lr 0.01"
+        },
+    ],
+    mlflow_experiment_name="my-experiment"
+)
 
-# 2. 사용자가 PR 리뷰 후 승인
-result = await approve_and_run_experiment(experiment_id="abc123")
-# -> 실험 실행 및 결과 반환
+# 상태 확인
+await get_queue_status()
+
+# 결과 조회
+await get_experiment_results()
 ```
-
-### Slack 명령어
-
-```
-@ai_research_auto_agent [Notion URL] 실험해줘
-
-# 옵션 지정
-@ai_research_auto_agent
-- spec: [Notion URL]
-- repo: ai-craft
-- gpu: true
-```
-
-### 지원 명령어
-
-| 명령어 | 설명 |
-|--------|------|
-| `help` | 도움말 |
-| `status <id>` | 실험 상태 확인 |
-| `list` | 대기 중인 실험 목록 |
-| `approve <id>` | 실험 승인 및 실행 |
-| `cancel <id>` | 실험 취소 |
 
 ## Project Structure
 
 ```
 ai-research-agent/
 ├── src/
-│   ├── mcp/                 # FastMCP 서버
-│   │   ├── server.py
-│   │   └── tools/
-│   │       ├── code_generator.py
-│   │       ├── github.py
-│   │       └── evaluator.py
-│   ├── core/                # 핵심 로직
+│   ├── core/               # 설정 및 데이터 모델
 │   │   ├── config.py
-│   │   └── github_code_reference.py
-│   └── k8s/                 # K8s 관리
-├── k8s/                     # K8s 배포 설정
-└── pyproject.toml
+│   │   └── models.py
+│   ├── experiment/          # 실험 큐 및 러너
+│   │   ├── queue.py
+│   │   └── runner.py
+│   ├── evaluation/          # 모델 평가
+│   │   └── evaluator.py
+│   ├── integrations/        # MLflow 클라이언트
+│   │   └── mlflow_client.py
+│   ├── k8s/                 # K8s Pod 실행
+│   │   └── pod_executor.py
+│   └── mcp/                 # MCP 서버
+│       └── server.py
+└── tests/
+    ├── unit/
+    └── integration/
 ```
+
+## Evaluation Criteria
+
+| Metric | Threshold | Condition |
+|--------|-----------|-----------|
+| AUC | 0.85 | > threshold |
+| LogLoss | 0.35 | < threshold |
+| Calibration Error | 0.02 | < threshold |
 
 ## Development
 
@@ -135,20 +119,7 @@ uv run ruff check .
 uv run ruff format .
 ```
 
-## Evaluation Criteria
-
-### Model Training
-- AUC > 0.85
-- LogLoss < 0.35
-- Calibration Error < 0.02
-
 ## Links
 
-- [설계 문서 (Notion)](https://www.notion.so/2e85bbc0e5c280cea91aed1898c5f53c)
 - [FastMCP Documentation](https://github.com/jlowin/fastmcp)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
-
-## Contact
-
-- **Team**: AI Team
-- **Slack**: #ai-team

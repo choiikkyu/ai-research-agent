@@ -1,15 +1,17 @@
 """MLflow client wrapper for experiment tracking."""
 
+from __future__ import annotations
+
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import mlflow
-    from mlflow.tracking import MlflowClient
+    from mlflow.tracking import MlflowClient as _MlflowClient
     MLFLOW_AVAILABLE = True
 except ImportError:
     MLFLOW_AVAILABLE = False
-    MlflowClient = None
+    _MlflowClient = None
 
 from src.core.config import settings
 
@@ -20,11 +22,7 @@ class MLflowClient:
     """MLflow client wrapper with error handling and fallbacks."""
 
     def __init__(self, tracking_uri: str = None):
-        """Initialize MLflow client.
-
-        Args:
-            tracking_uri: MLflow tracking server URI (optional)
-        """
+        """Initialize MLflow client."""
         if not MLFLOW_AVAILABLE:
             logger.warning("MLflow not available, using mock client")
             self._available = False
@@ -38,7 +36,7 @@ class MLflowClient:
                 mlflow.set_tracking_uri(tracking_uri)
                 logger.info(f"MLflow tracking URI set to: {tracking_uri}")
 
-            self.client = MlflowClient()
+            self.client = _MlflowClient()
             logger.info("MLflow client initialized successfully")
 
         except Exception as e:
@@ -52,41 +50,28 @@ class MLflowClient:
         return self._available
 
     async def get_latest_run_metrics(
-        self,
-        experiment_name: str
+        self, experiment_name: str
     ) -> Dict[str, float]:
-        """Get metrics from the latest run of an experiment.
-
-        Args:
-            experiment_name: Name of the MLflow experiment
-
-        Returns:
-            Dictionary of metric names to values
-        """
+        """Get metrics from the latest run of an experiment."""
         if not self.is_available:
             logger.warning("MLflow not available, returning empty metrics")
             return {}
 
         try:
-            # Get experiment by name
             experiment = self.client.get_experiment_by_name(experiment_name)
-
             if not experiment:
                 logger.warning(f"Experiment not found: {experiment_name}")
                 return {}
 
-            # Search for latest run
             runs = self.client.search_runs(
                 experiment_ids=[experiment.experiment_id],
                 order_by=["start_time DESC"],
-                max_results=1
+                max_results=1,
             )
 
             if runs and len(runs) > 0:
                 run = runs[0]
                 metrics = run.data.metrics
-
-                # Convert all metric values to float (MLflow returns float already)
                 metrics_dict = {k: float(v) for k, v in metrics.items()}
 
                 logger.info(
@@ -94,7 +79,6 @@ class MLflowClient:
                     f"(run_id: {run.info.run_id})"
                 )
 
-                # Log some key metrics
                 key_metrics = ["auc", "test_auc", "logloss", "test_logloss", "calibration_error"]
                 for km in key_metrics:
                     if km in metrics_dict:
@@ -110,14 +94,7 @@ class MLflowClient:
             return {}
 
     async def get_run_metrics(self, run_id: str) -> Dict[str, float]:
-        """Get metrics from a specific run.
-
-        Args:
-            run_id: MLflow run ID
-
-        Returns:
-            Dictionary of metric names to values
-        """
+        """Get metrics from a specific run."""
         if not self.is_available:
             logger.warning("MLflow not available, returning empty metrics")
             return {}
@@ -125,13 +102,8 @@ class MLflowClient:
         try:
             run = mlflow.get_run(run_id)
             metrics = run.data.metrics
-
             metrics_dict = {k: float(v) for k, v in metrics.items()}
-
-            logger.info(
-                f"Retrieved {len(metrics_dict)} metrics from run {run_id}"
-            )
-
+            logger.info(f"Retrieved {len(metrics_dict)} metrics from run {run_id}")
             return metrics_dict
 
         except Exception as e:
@@ -142,24 +114,14 @@ class MLflowClient:
         self,
         experiment_name: str,
         max_results: int = 10,
-        order_by: list[str] = None
-    ) -> list[Dict[str, any]]:
-        """Search for runs in an experiment.
-
-        Args:
-            experiment_name: Name of the MLflow experiment
-            max_results: Maximum number of runs to return
-            order_by: Order by clause (e.g., ["start_time DESC"])
-
-        Returns:
-            List of run information dicts
-        """
+        order_by: list[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Search for runs in an experiment."""
         if not self.is_available:
             return []
 
         try:
             experiment = self.client.get_experiment_by_name(experiment_name)
-
             if not experiment:
                 logger.warning(f"Experiment not found: {experiment_name}")
                 return []
@@ -170,7 +132,7 @@ class MLflowClient:
             runs = self.client.search_runs(
                 experiment_ids=[experiment.experiment_id],
                 max_results=max_results,
-                order_by=order_by
+                order_by=order_by,
             )
 
             runs_info = []
@@ -180,7 +142,7 @@ class MLflowClient:
                     "start_time": run.info.start_time,
                     "status": run.info.status,
                     "metrics": {k: float(v) for k, v in run.data.metrics.items()},
-                    "params": run.data.params
+                    "params": run.data.params,
                 })
 
             logger.info(f"Found {len(runs_info)} runs for {experiment_name}")
@@ -191,19 +153,9 @@ class MLflowClient:
             return []
 
     async def log_metrics(
-        self,
-        run_id: str,
-        metrics: Dict[str, float]
+        self, run_id: str, metrics: Dict[str, float]
     ) -> bool:
-        """Log metrics to an existing run.
-
-        Args:
-            run_id: MLflow run ID
-            metrics: Dictionary of metric names to values
-
-        Returns:
-            True if successful, False otherwise
-        """
+        """Log metrics to an existing run."""
         if not self.is_available:
             logger.warning("MLflow not available, cannot log metrics")
             return False
@@ -219,3 +171,75 @@ class MLflowClient:
         except Exception as e:
             logger.error(f"Failed to log metrics to run {run_id}: {e}")
             return False
+
+    async def set_run_tags(
+        self, run_id: str, tags: Dict[str, str]
+    ) -> bool:
+        """Set tags on an MLflow run.
+
+        Args:
+            run_id: MLflow run ID
+            tags: Dictionary of tag names to values
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_available:
+            logger.warning("MLflow not available, cannot set tags")
+            return False
+
+        try:
+            for key, value in tags.items():
+                self.client.set_tag(run_id, key, value)
+
+            logger.info(f"Set {len(tags)} tags on run {run_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to set tags on run {run_id}: {e}")
+            return False
+
+    async def create_experiment_run(
+        self,
+        experiment_name: str,
+        description: str = "",
+        tags: Optional[Dict[str, str]] = None,
+    ) -> Optional[str]:
+        """Create a new run in an experiment.
+
+        Args:
+            experiment_name: Name of the MLflow experiment
+            description: Description for the run
+            tags: Optional tags to set on the run
+
+        Returns:
+            Run ID if successful, None otherwise
+        """
+        if not self.is_available:
+            logger.warning("MLflow not available, cannot create run")
+            return None
+
+        try:
+            experiment = self.client.get_experiment_by_name(experiment_name)
+            if not experiment:
+                experiment_id = self.client.create_experiment(experiment_name)
+                logger.info(f"Created new experiment: {experiment_name}")
+            else:
+                experiment_id = experiment.experiment_id
+
+            run = self.client.create_run(
+                experiment_id=experiment_id,
+                tags=tags or {},
+            )
+
+            if description:
+                self.client.set_tag(run.info.run_id, "mlflow.note.content", description)
+
+            logger.info(
+                f"Created run {run.info.run_id} in experiment {experiment_name}"
+            )
+            return run.info.run_id
+
+        except Exception as e:
+            logger.error(f"Failed to create run in {experiment_name}: {e}")
+            return None

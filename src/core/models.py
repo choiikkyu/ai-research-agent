@@ -4,65 +4,54 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
+class ExperimentStatus(str, Enum):
+    """Status of an experiment."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
-class SessionStatus(str, Enum):
-    """Experiment session status.
+class ExperimentConfig(BaseModel):
+    """Configuration for a single experiment."""
 
-    Flow:
-    ACTIVE -> TERMINATED
-    """
-    ACTIVE = "active"           # Session is running with a pod
-    TERMINATED = "terminated"   # Session and pod terminated
-
-
-class TechSpec(BaseModel):
-    """Technical specification from Notion or other sources."""
-
-    title: str = Field(..., description="Title of the specification")
-    content: str = Field(..., description="Specification content")
-    task_type: str = Field(default="MODEL_TRAINING", description="Task type: MODEL_TRAINING only")
-    repository: str = Field(default="ai-craft", description="Target repository (ai-craft only)")
-    requirements: Dict[str, Any] = Field(default_factory=dict, description="Additional requirements")
-
-
-class ExperimentRequest(BaseModel):
-    """Request to run an experiment."""
-
-    spec_url: str = Field(..., description="URL to the technical specification")
-    repo: str = Field(default="ai-craft", description="Target repository")
-    gpu_enabled: bool = Field(default=False, description="Whether to use GPU")
-    auto_merge: bool = Field(default=False, description="Auto-merge if successful")
-    cleanup_on_failure: bool = Field(default=True, description="Cleanup resources on failure")
+    experiment_id: str = Field(..., description="Unique experiment identifier")
+    description: str = Field(..., description="Human-readable experiment description")
+    training_command: str = Field(..., description="Command to execute for training")
+    setup_commands: Optional[str] = Field(None, description="Shell commands to run before training (e.g., code modifications)")
+    repo_path: str = Field(default="/home/dable/ai-craft", description="Path to git repo on pod")
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="Additional parameters")
 
 
 class ExperimentResult(BaseModel):
-    """Result of an experiment."""
+    """Result of a single experiment."""
 
-    experiment_id: str = Field(..., description="Unique experiment identifier")
-    status: str = Field(..., description="Status: SUCCESS, FAILURE, or IN_PROGRESS")
+    config: ExperimentConfig = Field(..., description="Experiment configuration")
+    status: ExperimentStatus = Field(..., description="Experiment status")
     metrics: Dict[str, float] = Field(default_factory=dict, description="Experiment metrics")
-    pr_url: Optional[str] = Field(None, description="Pull request URL")
-    pod_name: Optional[str] = Field(None, description="Kubernetes pod name")
-    recommendations: List[str] = Field(default_factory=list, description="Recommendations")
+    duration_seconds: Optional[float] = Field(None, description="Execution duration in seconds")
+    stdout: str = Field(default="", description="Standard output")
+    stderr: str = Field(default="", description="Standard error")
+    git_diff: str = Field(default="", description="git diff main output before training")
+    evaluation: Optional[Dict[str, Any]] = Field(None, description="Evaluation results")
+    log_file: Optional[str] = Field(None, description="Path to log file on pod")
+    started_at: Optional[datetime] = Field(None, description="Start time")
+    completed_at: Optional[datetime] = Field(None, description="Completion time")
+
+    model_config = ConfigDict(use_enum_values=True)
 
 
-class ExperimentSession(BaseModel):
-    """Experiment session for running multiple experiments on a single pod.
+class ExperimentBatch(BaseModel):
+    """A batch of experiments to run sequentially."""
 
-    The pod remains active across multiple experiments until explicitly terminated.
-    """
-
-    session_id: str = Field(..., description="Unique session identifier")
+    batch_id: str = Field(..., description="Unique batch identifier")
     pod_name: str = Field(..., description="Kubernetes pod name")
-    status: SessionStatus = Field(default=SessionStatus.ACTIVE, description="Session status")
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="Session creation time")
-    experiment_ids: List[str] = Field(default_factory=list, description="List of experiment IDs in this session")
-    pod_type: str = Field(..., description="Pod type: gpu or cpu")
-    instance_type: str = Field(..., description="Instance type (e.g., g4dn.xlarge)")
+    namespace: str = Field(default="tf-box", description="Kubernetes namespace")
+    experiments: List[ExperimentConfig] = Field(default_factory=list, description="List of experiments")
+    results: List[ExperimentResult] = Field(default_factory=list, description="List of results")
+    created_at: datetime = Field(default_factory=datetime.utcnow, description="Batch creation time")
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
