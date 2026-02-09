@@ -40,17 +40,23 @@ _batch_task: Optional[asyncio.Task] = None
 @mcp.tool()
 async def submit_experiments(
     ctx: Context,
-    pod_name: str = Field(..., description="Name of the running K8s pod (in tf-box namespace)"),
-    utc_ymdh: str = Field(
-        ...,
-        description="UTC 기준 학습 데이터 시점. 형식: 'yyyy-mm-dd-hh' (예: '2026-02-06-00'). "
-        "학습 시 train(utc_ymdh=...) 인자로 전달됨. 사용자에게 반드시 확인 후 사용할 것.",
+    pod_name: Optional[str] = Field(
+        None,
+        description="Name of the running K8s pod (in tf-box namespace). "
+        "REQUIRED: Must ask user if not provided.",
     ),
-    experiments: List[Dict[str, Any]] = Field(
-        ...,
+    utc_ymdh: Optional[str] = Field(
+        None,
+        description="UTC 기준 학습 데이터 시점. 형식: 'yyyy-mm-dd-hh' (예: '2026-02-06-00'). "
+        "학습 시 train(utc_ymdh=...) 인자로 전달됨. "
+        "REQUIRED: 사용자에게 반드시 확인 후 사용할 것.",
+    ),
+    experiments: Optional[List[Dict[str, Any]]] = Field(
+        None,
         description="List of experiments. Each must have 'description' and 'training_command'. "
         "Optional: 'setup_commands' (코드 수정 셸 명령어, 학습 전 실행됨), 'parameters' dict. "
-        "매 실험 시작 시 자동으로 git checkout . 후 setup_commands 실행 → git diff main 기록 → 학습.",
+        "매 실험 시작 시 자동으로 git checkout . 후 setup_commands 실행 → git diff main 기록 → 학습. "
+        "REQUIRED: Must ask user if not provided.",
     ),
     repo_path: str = Field(
         default="/home/dable/ai-craft",
@@ -93,6 +99,43 @@ async def submit_experiments(
         ]
     """
     global _active_runner, _active_batch, _batch_task
+
+    # Check for required parameters and provide clear guidance
+    missing_params = []
+    if pod_name is None:
+        missing_params.append("pod_name")
+    if utc_ymdh is None:
+        missing_params.append("utc_ymdh")
+    if experiments is None or len(experiments) == 0:
+        missing_params.append("experiments")
+
+    if missing_params:
+        error_messages = []
+
+        if "pod_name" in missing_params:
+            error_messages.append(
+                "❌ **pod_name** is required.\n"
+                "   → Ask user: 'Which pod should I use for training?' (예: 'ai-craft-train-pod')"
+            )
+
+        if "utc_ymdh" in missing_params:
+            error_messages.append(
+                "❌ **utc_ymdh** is required.\n"
+                "   → Ask user: 'What training data timestamp should I use?' (형식: 'yyyy-mm-dd-hh', 예: '2026-02-06-00')\n"
+                "   → This is the UTC timestamp of the training data. YOU MUST ASK THE USER."
+            )
+
+        if "experiments" in missing_params:
+            error_messages.append(
+                "❌ **experiments** is required.\n"
+                "   → Ask user: 'What experiments would you like to run?' (예: baseline, ablation tests, etc.)"
+            )
+
+        return {
+            "status": "error",
+            "error": "Missing required parameters. Please ask the user for the following information:\n\n" + "\n\n".join(error_messages),
+            "missing_parameters": missing_params,
+        }
 
     # Validate utc_ymdh format: yyyy-mm-dd-hh
     utc_ymdh_pattern = r'^\d{4}-\d{2}-\d{2}-\d{2}$'
