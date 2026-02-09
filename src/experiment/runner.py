@@ -267,6 +267,18 @@ class ExperimentRunner:
         git_diff = ""
 
         try:
+            # Step 0: Clean up old marker files and log files to prevent false completion detection
+            self._exp_number += 1
+            await self._ensure_log_dir(config.repo_path)
+            log_file = self._get_log_file_path(config.repo_path, self._exp_number)
+            cleanup_script = f"rm -f {log_file} {log_file}.done {log_file}.failed {log_file}.train.sh"
+            await self.pod_executor.execute_on_pod(
+                pod_name=self.pod_name,
+                script=cleanup_script,
+                timeout=30,
+            )
+            logger.info(f"[{position}/{total}] Cleaned up old markers for: {log_file}")
+
             # Step 1: Reset repo to clean state
             await self._reset_repo(config.repo_path)
 
@@ -293,17 +305,45 @@ class ExperimentRunner:
             else:
                 logger.info(f"[{position}/{total}] No code changes (baseline)")
 
-            # Step 4: Ensure log directory exists and get log file path
-            self._exp_number += 1
-            await self._ensure_log_dir(config.repo_path)
-            log_file = self._get_log_file_path(config.repo_path, self._exp_number)
+            # Step 4: Log file path (already set in Step 0)
             logger.info(f"[{position}/{total}] Log file: {log_file}")
 
             # Step 5: Execute training command in background with nohup
-            # 백그라운드로 실행하고 완료 시 마커 파일 생성
+            # 1) training_command를 별도 스크립트 파일로 저장 (따옴표 문제 방지)
+            # 2) 그 스크립트를 nohup으로 백그라운드 실행
+            train_script_path = f"{log_file}.train.sh"
+
+            # heredoc으로 스크립트 파일 생성 (따옴표 이스케이프 불필요)
+            create_script = f"""cat > {train_script_path} << 'TRAIN_SCRIPT_EOF'
+#!/bin/bash
+set -e
+{config.training_command}
+TRAIN_SCRIPT_EOF
+chmod +x {train_script_path}
+"""
+            create_result = await self.pod_executor.execute_on_pod(
+                pod_name=self.pod_name,
+                script=create_script,
+                timeout=30,
+            )
+
+            if not create_result["success"]:
+                duration = time.time() - start_time
+                return ExperimentResult(
+                    config=config,
+                    status=ExperimentStatus.FAILED,
+                    duration_seconds=round(duration, 1),
+                    stderr=f"Failed to create training script: {create_result['stderr']}",
+                    git_diff=git_diff,
+                    log_file=log_file,
+                    started_at=started_at,
+                    completed_at=datetime.utcnow(),
+                )
+
+            # 백그라운드로 스크립트 실행하고 완료 시 마커 파일 생성
             bg_script = f"""
 nohup bash -c '
-  {config.training_command}
+  {train_script_path}
   if [ $? -eq 0 ]; then
     touch {log_file}.done
   else
