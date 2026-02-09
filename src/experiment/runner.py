@@ -97,6 +97,30 @@ class ExperimentRunner:
         )
         return self.queue.results
 
+    async def _cleanup_ray_session(self) -> None:
+        """Clean up any existing Ray sessions on the pod."""
+        cleanup_script = """
+# Kill any existing Ray processes
+pkill -9 -f ray 2>/dev/null || true
+
+# Remove Ray temp directories
+rm -rf /tmp/ray 2>/dev/null || true
+
+# Wait for cleanup
+sleep 2
+
+echo "Ray cleanup completed"
+"""
+        result = await self.pod_executor.execute_on_pod(
+            pod_name=self.pod_name,
+            script=cleanup_script,
+            timeout=30,
+        )
+        if result["success"]:
+            logger.info("Ray session cleaned up successfully")
+        else:
+            logger.warning(f"Ray cleanup warning: {result['stderr']}")
+
     async def _reset_repo(self, repo_path: str) -> None:
         """Reset the git repo on the pod to clean state."""
         reset_script = f"cd {repo_path} && git checkout . && git clean -fd"
@@ -253,13 +277,36 @@ DIFF_EOF
         )
         return result["success"] and "EXISTS" in result["stdout"]
 
+    async def _get_log_size(self, log_file: str) -> int:
+        """Get size of log file in bytes.
+
+        Args:
+            log_file: Path to log file
+
+        Returns:
+            Size in bytes, or 0 if file doesn't exist
+        """
+        # Use wc -c which is more portable than stat
+        size_script = f"wc -c < {log_file} 2>/dev/null || echo 0"
+        result = await self.pod_executor.execute_on_pod(
+            pod_name=self.pod_name,
+            script=size_script,
+            timeout=10,
+        )
+        if result["success"]:
+            try:
+                return int(result["stdout"].strip())
+            except ValueError:
+                return 0
+        return 0
+
     async def _wait_for_completion(
         self,
         log_file: str,
         position: int,
         total: int,
     ) -> str:
-        """Poll for experiment completion.
+        """Poll for experiment completion with fast failure detection.
 
         Args:
             log_file: Path to log file (used for marker file paths)
@@ -272,7 +319,15 @@ DIFF_EOF
         done_marker = f"{log_file}.done"
         failed_marker = f"{log_file}.failed"
 
+        # Fast polling for first 5 minutes (check every 30s)
+        fast_poll_duration = 300  # 5 minutes
+        fast_poll_interval = 30  # 30 seconds
+        elapsed_time = 0
+        last_log_size = 0
+        no_progress_count = 0
+
         while True:
+            # Check markers
             done = await self._check_marker(done_marker)
             if done:
                 return "completed"
@@ -281,11 +336,40 @@ DIFF_EOF
             if failed:
                 return "failed"
 
-            logger.info(
-                f"[{position}/{total}] Experiment running... "
-                f"next check in {self.poll_interval}s"
-            )
-            await asyncio.sleep(self.poll_interval)
+            # Check log size to detect progress
+            current_log_size = await self._get_log_size(log_file)
+
+            # Detect stalled training (no log growth for 3 consecutive checks)
+            if current_log_size > 0 and current_log_size == last_log_size:
+                no_progress_count += 1
+                if no_progress_count >= 3 and elapsed_time > 180:  # No progress for 3 checks after 3 minutes
+                    logger.error(
+                        f"[{position}/{total}] Training appears stalled (no log growth). "
+                        f"Log size: {current_log_size} bytes"
+                    )
+                    # Check if process is still running
+                    return "failed"
+            else:
+                no_progress_count = 0
+
+            last_log_size = current_log_size
+
+            # Use fast polling initially, then switch to normal polling
+            if elapsed_time < fast_poll_duration:
+                poll_interval = fast_poll_interval
+                logger.info(
+                    f"[{position}/{total}] Training in progress... "
+                    f"(log: {current_log_size} bytes, next check in {poll_interval}s)"
+                )
+            else:
+                poll_interval = self.poll_interval
+                logger.info(
+                    f"[{position}/{total}] Training in progress... "
+                    f"(log: {current_log_size} bytes, next check in {poll_interval}s)"
+                )
+
+            await asyncio.sleep(poll_interval)
+            elapsed_time += poll_interval
 
     async def _run_single(
         self,
@@ -327,6 +411,10 @@ DIFF_EOF
                 timeout=30,
             )
             logger.info(f"[{position}/{total}] Cleaned up old markers for: {log_file}")
+
+            # Step 0.5: Clean up Ray sessions to prevent GCS connection issues
+            logger.info(f"[{position}/{total}] Cleaning up Ray sessions...")
+            await self._cleanup_ray_session()
 
             # Step 1: Reset repo to clean state
             await self._reset_repo(config.repo_path)
@@ -442,16 +530,31 @@ echo $!
             log_content = await self._fetch_log_file(log_file)
 
             if completion_status == "failed":
+                # Extract error information from log
+                error_summary = "Training failed"
+                if log_content:
+                    # Get last 50 lines to find error
+                    log_lines = log_content.split("\n")
+                    last_lines = log_lines[-50:] if len(log_lines) > 50 else log_lines
+
+                    # Look for common error patterns
+                    for line in reversed(last_lines):
+                        if any(pattern in line for pattern in ["Error", "ERROR", "Exception", "FAILED", "Failed to connect"]):
+                            error_summary = line.strip()
+                            break
+
                 logger.error(
                     f"[{position}/{total}] FAILED: {config.description}"
                 )
-                logger.error(f"[{position}/{total}] Log saved to: {log_file}")
+                logger.error(f"[{position}/{total}] Error: {error_summary}")
+                logger.error(f"[{position}/{total}] Full log: {log_file}")
+
                 return ExperimentResult(
                     config=config,
                     status=ExperimentStatus.FAILED,
                     duration_seconds=round(duration, 1),
                     stdout=log_content,  # 로그 파일 내용 사용
-                    stderr=exec_result["stderr"],
+                    stderr=f"{error_summary}\n\nFull stderr: {exec_result['stderr']}",
                     git_diff=git_diff,
                     log_file=log_file,
                     diff_file=diff_file,
