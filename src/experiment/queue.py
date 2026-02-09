@@ -109,6 +109,7 @@ class ExperimentQueue:
                 "metrics": result.metrics,
                 "git_diff_lines": len(result.git_diff.splitlines()) if result.git_diff else 0,
                 "log_file": result.log_file,
+                "diff_file": result.diff_file,
             }
             if result.evaluation:
                 entry["passed"] = result.evaluation.get("passed", False)
@@ -171,4 +172,5 @@ class ExperimentQueue:
             results=results,
             model_name=model_name,
             best_experiment=summary.get("best_experiment"),
+            full_results=self._results,
         )

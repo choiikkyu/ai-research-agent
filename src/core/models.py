@@ -38,6 +38,7 @@ class ExperimentResult(BaseModel):
     git_diff: str = Field(default="", description="git diff main output before training")
     evaluation: Optional[Dict[str, Any]] = Field(None, description="Evaluation results")
     log_file: Optional[str] = Field(None, description="Path to log file on pod")
+    diff_file: Optional[str] = Field(None, description="Path to diff file on pod")
     started_at: Optional[datetime] = Field(None, description="Start time")
     completed_at: Optional[datetime] = Field(None, description="Completion time")
 

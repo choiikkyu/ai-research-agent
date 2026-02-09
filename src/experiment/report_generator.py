@@ -56,6 +56,7 @@ def generate_markdown_report(
     results: List[Dict[str, Any]],
     model_name: str = "model",
     best_experiment: Optional[Dict[str, Any]] = None,
+    full_results: Optional[List[Any]] = None,
 ) -> str:
     """Generate enhanced markdown report with MLflow metrics comparison.
 
@@ -246,6 +247,27 @@ def generate_markdown_report(
             report.append("- Configurations tested:")
             for config in sorted(unique_configs):
                 report.append(f"  - {config}")
+
+        report.append("")
+
+    # Code Changes Details
+    if full_results and any(r.git_diff for r in full_results):
+        report.append("### Code Changes Details")
+        report.append("")
+
+        for i, result in enumerate(full_results, 1):
+            if result.git_diff:
+                report.append(f"#### Experiment {i}: {result.config.description}")
+                report.append("")
+                report.append("<details>")
+                report.append(f"<summary>View diff ({len(result.git_diff.splitlines())} lines)</summary>")
+                report.append("")
+                report.append("```diff")
+                report.append(result.git_diff)
+                report.append("```")
+                report.append("")
+                report.append("</details>")
+                report.append("")
 
         report.append("")
 

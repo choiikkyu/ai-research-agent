@@ -142,6 +142,42 @@ class ExperimentRunner:
             return result["stdout"]
         return ""
 
+    async def _save_diff_to_disk(
+        self,
+        diff_content: str,
+        diff_file_path: str
+    ) -> bool:
+        """Save git diff content to a file on the pod.
+
+        Args:
+            diff_content: Git diff output to save
+            diff_file_path: Path where diff should be saved
+
+        Returns:
+            True if save succeeded, False otherwise
+        """
+        # Handle empty diff case
+        content_to_save = diff_content if diff_content else "No code changes (baseline experiment)\n"
+
+        # Use heredoc to safely write diff content (handles special characters)
+        save_script = f"""cat > {diff_file_path} << 'DIFF_EOF'
+{content_to_save}
+DIFF_EOF
+"""
+
+        result = await self.pod_executor.execute_on_pod(
+            pod_name=self.pod_name,
+            script=save_script,
+            timeout=30,
+        )
+
+        if not result["success"]:
+            logger.warning(f"Failed to save diff file: {diff_file_path} - {result['stderr']}")
+            return False
+
+        logger.info(f"Saved diff to: {diff_file_path}")
+        return True
+
     async def _ensure_log_dir(self, repo_path: str) -> str:
         """Ensure log directory exists on the pod.
 
@@ -168,6 +204,18 @@ class ExperimentRunner:
             Full path to log file
         """
         return f"{repo_path}/{EXP_LOG_DIR}/exp{exp_number}.log"
+
+    def _get_diff_file_path(self, repo_path: str, exp_number: int) -> str:
+        """Get diff file path for an experiment.
+
+        Args:
+            repo_path: Path to the repo on pod
+            exp_number: Experiment number (1-indexed)
+
+        Returns:
+            Full path to diff file
+        """
+        return f"{repo_path}/{EXP_LOG_DIR}/exp{exp_number}.diff"
 
     async def _fetch_log_file(self, log_path: str) -> str:
         """Fetch log file content from pod.
@@ -271,7 +319,8 @@ class ExperimentRunner:
             self._exp_number += 1
             await self._ensure_log_dir(config.repo_path)
             log_file = self._get_log_file_path(config.repo_path, self._exp_number)
-            cleanup_script = f"rm -f {log_file} {log_file}.done {log_file}.failed {log_file}.train.sh"
+            diff_file = self._get_diff_file_path(config.repo_path, self._exp_number)
+            cleanup_script = f"rm -f {log_file} {log_file}.done {log_file}.failed {log_file}.train.sh {diff_file}"
             await self.pod_executor.execute_on_pod(
                 pod_name=self.pod_name,
                 script=cleanup_script,
@@ -292,12 +341,17 @@ class ExperimentRunner:
                         status=ExperimentStatus.FAILED,
                         duration_seconds=round(duration, 1),
                         stderr="Setup commands failed",
+                        diff_file=diff_file,
                         started_at=started_at,
                         completed_at=datetime.utcnow(),
                     )
 
-            # Step 3: Capture git diff
+            # Step 3: Capture git diff and save to disk
             git_diff = await self._capture_git_diff(config.repo_path)
+
+            # Save diff to disk (non-blocking - log warning on failure)
+            await self._save_diff_to_disk(git_diff, diff_file)
+
             if git_diff:
                 logger.info(
                     f"[{position}/{total}] Code changes ({len(git_diff.splitlines())} lines diff)"
@@ -336,6 +390,7 @@ chmod +x {train_script_path}
                     stderr=f"Failed to create training script: {create_result['stderr']}",
                     git_diff=git_diff,
                     log_file=log_file,
+                    diff_file=diff_file,
                     started_at=started_at,
                     completed_at=datetime.utcnow(),
                 )
@@ -367,6 +422,7 @@ echo $!
                     stderr=f"Failed to start experiment: {exec_result['stderr']}",
                     git_diff=git_diff,
                     log_file=log_file,
+                    diff_file=diff_file,
                     started_at=started_at,
                     completed_at=datetime.utcnow(),
                 )
@@ -398,6 +454,7 @@ echo $!
                     stderr=exec_result["stderr"],
                     git_diff=git_diff,
                     log_file=log_file,
+                    diff_file=diff_file,
                     started_at=started_at,
                     completed_at=completed_at,
                 )
@@ -445,6 +502,7 @@ echo $!
                 stderr=exec_result["stderr"],
                 git_diff=git_diff,
                 log_file=log_file,
+                diff_file=diff_file,
                 evaluation=evaluation,
                 started_at=started_at,
                 completed_at=completed_at,
@@ -455,12 +513,15 @@ echo $!
             logger.error(
                 f"[{position}/{total}] ERROR: {config.description}: {str(e)}"
             )
+            # diff_file may not be defined if exception occurred very early
+            diff_file_path = self._get_diff_file_path(config.repo_path, self._exp_number) if self._exp_number > 0 else None
             return ExperimentResult(
                 config=config,
                 status=ExperimentStatus.FAILED,
                 duration_seconds=round(duration, 1),
                 stderr=str(e),
                 git_diff=git_diff,
+                diff_file=diff_file_path,
                 started_at=started_at,
                 completed_at=datetime.utcnow(),
             )
