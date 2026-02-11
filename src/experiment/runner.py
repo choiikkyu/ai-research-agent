@@ -67,6 +67,10 @@ class ExperimentRunner:
         # Verify pod is running
         await self.verify_pod()
 
+        # Validate pod environment with first experiment config
+        if configs:
+            await self._validate_pod_environment(configs[0])
+
         # Add experiments to queue
         self.queue.add_batch(configs)
         total = len(configs)
@@ -202,20 +206,137 @@ DIFF_EOF
         logger.info(f"Saved diff to: {diff_file_path}")
         return True
 
+    async def _execute_kubectl_direct(
+        self,
+        command: str,
+        timeout: int = 300,
+    ) -> dict:
+        """Execute command directly via kubectl without intermediate script file.
+
+        This bypasses PodExecutor to avoid quote escaping issues with complex commands.
+
+        Args:
+            command: Shell command to execute on pod
+            timeout: Command timeout in seconds
+
+        Returns:
+            Dict with success, stdout, stderr, returncode
+        """
+        kubectl_cmd = [
+            "kubectl", "exec", "-n", self.namespace, self.pod_name,
+            "--", "bash", "-c", command
+        ]
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *kubectl_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout,
+            )
+
+            return {
+                "success": process.returncode == 0,
+                "stdout": stdout.decode("utf-8") if stdout else "",
+                "stderr": stderr.decode("utf-8") if stderr else "",
+                "returncode": process.returncode,
+            }
+
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": "Command timed out",
+                "returncode": -1,
+            }
+        except Exception as e:
+            logger.error(f"kubectl exec failed: {str(e)}")
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": str(e),
+                "returncode": -1,
+            }
+
     async def _ensure_log_dir(self, repo_path: str) -> str:
         """Ensure log directory exists on the pod.
 
         Returns:
             Path to log directory
+
+        Raises:
+            RuntimeError: If directory creation fails
         """
         log_dir = f"{repo_path}/{EXP_LOG_DIR}"
-        mkdir_script = f"mkdir -p {log_dir}"
-        await self.pod_executor.execute_on_pod(
-            pod_name=self.pod_name,
-            script=mkdir_script,
+        mkdir_command = f"mkdir -p {log_dir} && echo 'SUCCESS'"
+
+        result = await self._execute_kubectl_direct(
+            command=mkdir_command,
             timeout=30,
         )
+
+        if not result["success"] or "SUCCESS" not in result["stdout"]:
+            raise RuntimeError(
+                f"Failed to create log directory '{log_dir}': {result.get('stderr', 'Unknown error')}"
+            )
+
+        logger.info(f"Log directory ready: {log_dir}")
         return log_dir
+
+    async def _validate_pod_environment(self, config: ExperimentConfig) -> None:
+        """Validate that the pod environment is ready for experiments.
+
+        Args:
+            config: Experiment configuration to validate against
+
+        Raises:
+            RuntimeError: If environment is not suitable for experiments
+        """
+        validation_script = f"""
+# Check if repo path exists
+if [ ! -d "{config.repo_path}" ]; then
+    echo "ERROR: repo_path does not exist: {config.repo_path}"
+    exit 1
+fi
+
+# Check if we can write to repo path
+if [ ! -w "{config.repo_path}" ]; then
+    echo "ERROR: repo_path is not writable: {config.repo_path}"
+    exit 1
+fi
+
+# Check if Python is available
+if ! which python > /dev/null 2>&1; then
+    echo "ERROR: Python not found in PATH"
+    exit 1
+fi
+
+# Check if git is available (for setup commands)
+if ! which git > /dev/null 2>&1; then
+    echo "WARNING: git not found in PATH"
+fi
+
+echo "VALIDATION_SUCCESS"
+"""
+
+        result = await self.pod_executor.execute_on_pod(
+            pod_name=self.pod_name,
+            script=validation_script,
+            timeout=30,
+        )
+
+        if not result["success"] or "VALIDATION_SUCCESS" not in result["stdout"]:
+            raise RuntimeError(
+                f"Pod environment validation failed:\n{result.get('stdout', '')}"
+            )
+
+        logger.info(f"Pod environment validated successfully")
 
     def _get_log_file_path(self, repo_path: str, exp_number: int) -> str:
         """Get log file path for an experiment.
@@ -404,7 +525,7 @@ DIFF_EOF
             await self._ensure_log_dir(config.repo_path)
             log_file = self._get_log_file_path(config.repo_path, self._exp_number)
             diff_file = self._get_diff_file_path(config.repo_path, self._exp_number)
-            cleanup_script = f"rm -f {log_file} {log_file}.done {log_file}.failed {log_file}.train.sh {diff_file}"
+            cleanup_script = f"rm -f {log_file} {log_file}.done {log_file}.failed {diff_file}"
             await self.pod_executor.execute_on_pod(
                 pod_name=self.pod_name,
                 script=cleanup_script,
@@ -450,55 +571,27 @@ DIFF_EOF
             # Step 4: Log file path (already set in Step 0)
             logger.info(f"[{position}/{total}] Log file: {log_file}")
 
-            # Step 5: Execute training command in background with nohup
-            # 1) training_command를 별도 스크립트 파일로 저장 (따옴표 문제 방지)
-            # 2) 그 스크립트를 nohup으로 백그라운드 실행
-            train_script_path = f"{log_file}.train.sh"
-
-            # heredoc으로 스크립트 파일 생성 (따옴표 이스케이프 불필요)
-            create_script = f"""cat > {train_script_path} << 'TRAIN_SCRIPT_EOF'
-#!/bin/bash
-set -e
-{config.training_command}
-TRAIN_SCRIPT_EOF
-chmod +x {train_script_path}
-"""
-            create_result = await self.pod_executor.execute_on_pod(
-                pod_name=self.pod_name,
-                script=create_script,
-                timeout=30,
-            )
-
-            if not create_result["success"]:
-                duration = time.time() - start_time
-                return ExperimentResult(
-                    config=config,
-                    status=ExperimentStatus.FAILED,
-                    duration_seconds=round(duration, 1),
-                    stderr=f"Failed to create training script: {create_result['stderr']}",
-                    git_diff=git_diff,
-                    log_file=log_file,
-                    diff_file=diff_file,
-                    started_at=started_at,
-                    completed_at=datetime.utcnow(),
-                )
-
-            # 백그라운드로 스크립트 실행하고 완료 시 마커 파일 생성
-            bg_script = f"""
-nohup bash -c '
-  {train_script_path}
-  if [ $? -eq 0 ]; then
+            # Step 5: Execute training command directly in background with nohup
+            # Use direct kubectl exec to avoid quote escaping issues
+            # This approach matches the successful manual execution
+            bg_command = f'''
+nohup bash -c "
+  set -e
+  {config.training_command}
+  exit_code=\\$?
+  if [ \\$exit_code -eq 0 ]; then
     touch {log_file}.done
   else
     touch {log_file}.failed
   fi
-' > {log_file} 2>&1 &
+  exit \\$exit_code
+" > {log_file} 2>&1 &
 echo $!
-"""
-            exec_result = await self.pod_executor.execute_on_pod(
-                pod_name=self.pod_name,
-                script=bg_script,
-                timeout=60,  # 백그라운드 시작은 빠르게 완료
+'''
+
+            exec_result = await self._execute_kubectl_direct(
+                command=bg_command,
+                timeout=60,
             )
 
             if not exec_result["success"]:
@@ -517,6 +610,39 @@ echo $!
 
             pid = exec_result["stdout"].strip()
             logger.info(f"[{position}/{total}] Started background process (PID: {pid})")
+
+            # Step 5.5: Verify process started successfully
+            # Wait 5 seconds, then check if process is still running
+            await asyncio.sleep(5)
+
+            check_pid_command = f"ps -p {pid} > /dev/null 2>&1 && echo 'RUNNING' || echo 'NOT_RUNNING'"
+            pid_check_result = await self._execute_kubectl_direct(
+                command=check_pid_command,
+                timeout=10,
+            )
+
+            if "NOT_RUNNING" in pid_check_result.get("stdout", ""):
+                # Process died immediately - fetch log for error details
+                log_content = await self._fetch_log_file(log_file)
+                duration = time.time() - start_time
+
+                logger.error(f"[{position}/{total}] Process died within 5 seconds")
+                logger.error(f"[{position}/{total}] Log content:\n{log_content[-1000:] if log_content else 'No log available'}")
+
+                return ExperimentResult(
+                    config=config,
+                    status=ExperimentStatus.FAILED,
+                    duration_seconds=round(duration, 1),
+                    stderr=f"Training process died within 5 seconds. Check log for details.",
+                    stdout=log_content,
+                    git_diff=git_diff,
+                    log_file=log_file,
+                    diff_file=diff_file,
+                    started_at=started_at,
+                    completed_at=datetime.utcnow(),
+                )
+
+            logger.info(f"[{position}/{total}] Process verified running (PID: {pid})")
 
             # Step 6: Poll for completion
             completion_status = await self._wait_for_completion(
